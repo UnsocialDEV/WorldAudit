@@ -1,0 +1,113 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Configurations>Debug;Release;AnyCPU</Configurations>
+    <VintageStoryPackageDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\vintagestory-package\</VintageStoryPackageDir>
+    <VintageStoryPackageNativeDir>$(VintageStoryPackageDir)native\</VintageStoryPackageNativeDir>
+    <VintageStoryPackageZip>$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\$(AssemblyName)-vintagestory.zip</VintageStoryPackageZip>
+    <VintageStoryMergedAssemblyPath>$(VintageStoryPackageDir)$(AssemblyName).dll</VintageStoryMergedAssemblyPath>
+    <VintageStoryNativeRuntimeIdentifiers Condition="'$(VintageStoryNativeRuntimeIdentifiers)' == ''">win-x64;linux-x64;linux-arm64;osx-x64</VintageStoryNativeRuntimeIdentifiers>
+    <VintageStoryPackageOnPublish Condition="'$(VintageStoryPackageOnPublish)' == ''">true</VintageStoryPackageOnPublish>
+    <VintageStoryApiPath Condition="'$(VintageStoryApiPath)' == '' and '$(VINTAGESTORY_API_PATH)' != ''">$(VINTAGESTORY_API_PATH)</VintageStoryApiPath>
+    <VintageStoryApiPath Condition="'$(VintageStoryApiPath)' == '' and Exists('$(APPDATA)\Vintagestory\VintagestoryAPI.dll')">$(APPDATA)\Vintagestory\VintagestoryAPI.dll</VintageStoryApiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.44" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI">
+      <HintPath>$(VintageStoryApiPath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <VintageStoryNativeRuntimeAsset Include="win-x64" Condition="$([System.String]::Copy('$(VintageStoryNativeRuntimeIdentifiers)').Contains('win-x64'))">
+      <NativeLibraryFileName>e_sqlite3.dll</NativeLibraryFileName>
+    </VintageStoryNativeRuntimeAsset>
+    <VintageStoryNativeRuntimeAsset Include="linux-x64" Condition="$([System.String]::Copy('$(VintageStoryNativeRuntimeIdentifiers)').Contains('linux-x64'))">
+      <NativeLibraryFileName>libe_sqlite3.so</NativeLibraryFileName>
+    </VintageStoryNativeRuntimeAsset>
+    <VintageStoryNativeRuntimeAsset Include="linux-arm64" Condition="$([System.String]::Copy('$(VintageStoryNativeRuntimeIdentifiers)').Contains('linux-arm64'))">
+      <NativeLibraryFileName>libe_sqlite3.so</NativeLibraryFileName>
+    </VintageStoryNativeRuntimeAsset>
+    <VintageStoryNativeRuntimeAsset Include="osx-x64" Condition="$([System.String]::Copy('$(VintageStoryNativeRuntimeIdentifiers)').Contains('osx-x64'))">
+      <NativeLibraryFileName>libe_sqlite3.dylib</NativeLibraryFileName>
+    </VintageStoryNativeRuntimeAsset>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="modinfo.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="assets\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="PackageVintageStoryMod" DependsOnTargets="Publish" />
+
+  <Target Name="_ValidateVintageStoryApiPath" BeforeTargets="ResolveReferences">
+    <Error
+      Condition="'$(VintageStoryApiPath)' == '' or !Exists('$(VintageStoryApiPath)')"
+      Text="VintagestoryAPI.dll was not found. Set the VintageStoryApiPath MSBuild property or the VINTAGESTORY_API_PATH environment variable to the API assembly." />
+  </Target>
+
+  <Target Name="_PackageVintageStoryModAfterPublish" AfterTargets="Publish" Condition="'$(VintageStoryPackageOnPublish)' == 'true'">
+    <ItemGroup>
+      <VintageStoryManagedMergeInput Include="$(PublishDir)$(AssemblyName).dll" />
+      <VintageStoryManagedMergeInput Include="$(PublishDir)Microsoft.Data.Sqlite.dll" />
+      <VintageStoryManagedMergeInput Include="$(PublishDir)SQLitePCLRaw.batteries_v2.dll" />
+      <VintageStoryManagedMergeInput Include="$(PublishDir)SQLitePCLRaw.core.dll" />
+      <VintageStoryManagedMergeInput Include="$(PublishDir)SQLitePCLRaw.provider.e_sqlite3.dll" />
+
+      <VintageStoryRootPackageFile Include="$(PublishDir)modinfo.json" />
+      <VintageStoryAssetPackageFile Include="$(MSBuildProjectDirectory)\assets\**\*" />
+      <VintageStoryNativePackageAsset Include="@(VintageStoryNativeRuntimeAsset)">
+        <SourcePath>$(PublishDir)runtimes\%(Identity)\native\%(NativeLibraryFileName)</SourcePath>
+        <DestinationPath>$(VintageStoryPackageNativeDir)%(Identity)\%(NativeLibraryFileName)</DestinationPath>
+      </VintageStoryNativePackageAsset>
+    </ItemGroup>
+
+    <Error
+      Condition="!Exists('%(VintageStoryNativePackageAsset.SourcePath)')"
+      Text="Missing native SQLite asset for %(VintageStoryNativePackageAsset.Identity) at %(VintageStoryNativePackageAsset.SourcePath)." />
+
+    <RemoveDir Directories="$(VintageStoryPackageDir)" Condition="Exists('$(VintageStoryPackageDir)')" />
+    <MakeDir Directories="$(VintageStoryPackageDir)" />
+    <MakeDir Directories="$(VintageStoryPackageNativeDir)" />
+    <MakeDir Directories="@(VintageStoryNativeRuntimeAsset -> '$(VintageStoryPackageNativeDir)%(Identity)')" />
+
+    <ILRepack
+      InputAssemblies="@(VintageStoryManagedMergeInput)"
+      OutputFile="$(VintageStoryMergedAssemblyPath)"
+      LibraryPath="$(PublishDir)"
+      Internalize="true"
+      Parallel="true"
+      DebugInfo="true"
+      TargetKind="Dll" />
+
+    <Copy SourceFiles="@(VintageStoryRootPackageFile)" DestinationFolder="$(VintageStoryPackageDir)" SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(VintageStoryAssetPackageFile)"
+      DestinationFiles="@(VintageStoryAssetPackageFile->'$(VintageStoryPackageDir)assets\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(VintageStoryNativePackageAsset->'%(SourcePath)')"
+      DestinationFiles="@(VintageStoryNativePackageAsset->'%(DestinationPath)')"
+      SkipUnchangedFiles="true" />
+
+    <Delete Files="$(VintageStoryPackageZip)" Condition="Exists('$(VintageStoryPackageZip)')" />
+    <ZipDirectory SourceDirectory="$(VintageStoryPackageDir)" DestinationFile="$(VintageStoryPackageZip)" Overwrite="true" />
+
+    <Message Importance="High" Text="Vintage Story package prepared at $(VintageStoryPackageDir)" />
+    <Message Importance="High" Text="Vintage Story zip prepared at $(VintageStoryPackageZip)" />
+  </Target>
+
+</Project>

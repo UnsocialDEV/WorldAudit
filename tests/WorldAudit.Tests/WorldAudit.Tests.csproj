@@ -1,0 +1,37 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <Configurations>Debug;Release;AnyCPU</Configurations>
+    <VintageStoryApiPath Condition="'$(VintageStoryApiPath)' == '' and '$(VINTAGESTORY_API_PATH)' != ''">$(VINTAGESTORY_API_PATH)</VintageStoryApiPath>
+    <VintageStoryApiPath Condition="'$(VintageStoryApiPath)' == '' and Exists('$(APPDATA)\Vintagestory\VintagestoryAPI.dll')">$(APPDATA)\Vintagestory\VintagestoryAPI.dll</VintageStoryApiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\WorldAudit\WorldAudit.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI">
+      <HintPath>$(VintageStoryApiPath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

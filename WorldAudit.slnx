@@ -1,0 +1,16 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="AnyCPU" />
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+  </Configurations>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/WorldAudit.Benchmarks/WorldAudit.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WorldAudit.Tests/WorldAudit.Tests.csproj">
+      <BuildType Solution="AnyCPU|*" Project="Release" />
+    </Project>
+  </Folder>
+  <Project Path="WorldAudit/WorldAudit.csproj" />
+</Solution>

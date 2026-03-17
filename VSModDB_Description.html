@@ -1,0 +1,174 @@
+<h1>WorldAudit</h1>
+<p><em>Server-side block, container, lookup, and rollback auditing for Vintage Story.</em></p>
+
+<p>WorldAudit records what changed in your world, who changed it, what caused it, and gives admins the tools to inspect history, investigate griefing, preview rollbacks, restore changes, and apply fixes safely.</p>
+
+<p><strong>Support Discord:</strong><br><a href="https://discord.gg/5365aHU7rt">https://discord.gg/5365aHU7rt</a></p>
+
+<hr>
+
+<h2>Features</h2>
+<ul>
+  <li><strong>Server-side auditing</strong> - Runs on the server and stores audit data in SQLite.</li>
+  <li><strong>Block history</strong> - Records block placement, breaking, and other block mutations with actor, cause, action, before/after block codes, and timestamps.</li>
+  <li><strong>Container history</strong> - Records container transactions with before/after inventory snapshots and per-slot deltas.</li>
+  <li><strong>Inspect mode</strong> - Interact with a block or container in-game to see its recent history immediately.</li>
+  <li><strong>Lookup tools</strong> - Search audit history around your position with time, radius, user, cause, action, and code filters.</li>
+  <li><strong>Rollback preview jobs</strong> - Build rollback plans before applying anything to the world.</li>
+  <li><strong>Restore preview jobs</strong> - Rebuild changes from history when you want to put something back.</li>
+  <li><strong>Undo jobs</strong> - Generate a new job that inverts a completed rollback or restore.</li>
+  <li><strong>Incremental apply</strong> - Applies rollback and restore jobs over future ticks instead of trying to do everything at once.</li>
+  <li><strong>Synthetic re-audit</strong> - Rollback and restore changes are logged too, so admin actions remain auditable.</li>
+  <li><strong>Maintenance tools</strong> - Includes retention, purge, WAL checkpointing, optimize, queue status, and consumer pause/resume controls.</li>
+</ul>
+
+<hr>
+
+<h2>What Gets Logged</h2>
+<ul>
+  <li>Who made the change</li>
+  <li>What action happened</li>
+  <li>The suspected cause when available</li>
+  <li>The time of the change</li>
+  <li>The position of the change</li>
+  <li>The old and new block state</li>
+  <li>Block entity snapshots when relevant</li>
+  <li>Container item movements and slot-level changes</li>
+</ul>
+
+<hr>
+
+<h2>How To Install</h2>
+<ul>
+  <li>Install the mod on the server.</li>
+  <li>Start the server once so the config file is generated.</li>
+  <li>Adjust <strong>worldaudit.json</strong> if you want to change database path, page size, retention, rollback speed, or enable/disable capture systems.</li>
+  <li>Make sure the admins or moderators who need it have permission to use the commands.</li>
+</ul>
+
+<p><strong>Side:</strong> Server only</p>
+
+<hr>
+
+<h2>How To Use</h2>
+
+<h3>1. Inspect a block or container</h3>
+<ul>
+  <li>Use <strong>/wa inspect</strong> to toggle inspect mode on.</li>
+  <li>Then interact with a block or container in the world.</li>
+  <li>WorldAudit will show the recent history for what you clicked, opened, used, or broke.</li>
+  <li>Use <strong>/wa inspect</strong> again to turn inspect mode off.</li>
+</ul>
+
+<h3>2. Search nearby history</h3>
+<ul>
+  <li>Use <strong>/wa near</strong> to search around your current position using the configured default radius.</li>
+  <li>Use <strong>/wa lookup</strong> when you want more control over filters.</li>
+</ul>
+
+<h3>3. Preview a rollback</h3>
+<ul>
+  <li>Use <strong>/wa rollback</strong> with filters to create a preview job.</li>
+  <li>Review the created job before applying it.</li>
+  <li>When you are satisfied, run <strong>/wa apply &lt;jobId&gt;</strong>.</li>
+</ul>
+
+<h3>4. Preview a restore</h3>
+<ul>
+  <li>Use <strong>/wa restore</strong> with filters to create a restore preview job.</li>
+  <li>Apply it later with <strong>/wa apply &lt;jobId&gt;</strong>.</li>
+</ul>
+
+<h3>5. Undo an admin action</h3>
+<ul>
+  <li>Use <strong>/wa undo &lt;jobId&gt;</strong> to create a new preview that reverses a completed rollback or restore job.</li>
+  <li>Apply that new job if needed.</li>
+</ul>
+
+<h3>6. Review jobs and system state</h3>
+<ul>
+  <li><strong>/wa jobs</strong> shows recent rollback and restore jobs.</li>
+  <li><strong>/wa job &lt;jobId&gt;</strong> shows one job in detail.</li>
+  <li><strong>/wa status</strong> shows queue, rollback, database, and maintenance status.</li>
+</ul>
+
+<hr>
+
+<h2>Command Reference</h2>
+<ul>
+  <li><strong>/wa inspect</strong> - Toggle inspect mode. Interact with a block or container to view history.</li>
+  <li><strong>/wa lookup [filters]</strong> - Search audit history around your current position.</li>
+  <li><strong>/wa near [filters]</strong> - Search nearby history using the configured default radius.</li>
+  <li><strong>/wa rollback [filters]</strong> - Create a rollback preview job.</li>
+  <li><strong>/wa restore [filters]</strong> - Create a restore preview job.</li>
+  <li><strong>/wa undo &lt;jobId&gt;</strong> - Create a preview job that reverses a completed job.</li>
+  <li><strong>/wa apply &lt;jobId&gt;</strong> - Queue a preview job for execution.</li>
+  <li><strong>/wa jobs</strong> - List recent jobs.</li>
+  <li><strong>/wa job &lt;jobId&gt;</strong> - Show one job in detail.</li>
+  <li><strong>/wa status</strong> - Show runtime, queue, maintenance, and rollback status.</li>
+  <li><strong>/wa reload</strong> - Reload the config and rebuild runtime services.</li>
+  <li><strong>/wa consumer pause</strong> - Pause database consumption.</li>
+  <li><strong>/wa consumer resume</strong> - Resume database consumption.</li>
+  <li><strong>/wa purge t:&lt;age&gt;</strong> - Preview a purge by age.</li>
+  <li><strong>/wa purge confirm t:&lt;age&gt;</strong> - Execute the purge.</li>
+</ul>
+
+<hr>
+
+<h2>Filter Syntax</h2>
+<p>These filters can be used with lookup, near, rollback, and restore commands:</p>
+<ul>
+  <li><strong>t:&lt;time&gt;</strong> - Time range</li>
+  <li><strong>r:&lt;radius&gt;</strong> - Search radius</li>
+  <li><strong>u:&lt;user|#cause&gt;</strong> - Player name or cause</li>
+  <li><strong>a:&lt;action&gt;</strong> - Block action</li>
+  <li><strong>i:&lt;codes&gt;</strong> - Include block codes</li>
+  <li><strong>e:&lt;codes&gt;</strong> - Exclude block codes</li>
+  <li><strong>-b</strong> - Exclude block history</li>
+  <li><strong>-c</strong> - Exclude container history</li>
+</ul>
+
+<p><strong>Example ideas:</strong></p>
+<ul>
+  <li><strong>/wa near t:1d</strong> to review recent nearby changes</li>
+  <li><strong>/wa lookup u:PlayerName r:10</strong> to review one player in a specific area</li>
+  <li><strong>/wa rollback t:2h u:PlayerName</strong> to preview rolling back a player's recent changes</li>
+  <li><strong>/wa restore t:30m r:5</strong> to preview restoring recent changes in a small area</li>
+</ul>
+
+<hr>
+
+<h2>Configuration Highlights</h2>
+<p>WorldAudit creates a <strong>worldaudit.json</strong> config file. Important options include:</p>
+<ul>
+  <li>Database path</li>
+  <li>Writer batch size and flush timing</li>
+  <li>Default page size</li>
+  <li>Default near radius</li>
+  <li>Rollback preview limit</li>
+  <li>Rollback blocks processed per tick</li>
+  <li>Retention days</li>
+  <li>Checkpoint and optimize intervals</li>
+  <li>Enable or disable block audit</li>
+  <li>Enable or disable container audit</li>
+  <li>Enable or disable natural and system cause providers</li>
+  <li>Verbose diagnostics logging</li>
+</ul>
+
+<hr>
+
+<h2>Why Use WorldAudit</h2>
+<ul>
+  <li>Investigate griefing and suspicious edits</li>
+  <li>Review container theft and item movement</li>
+  <li>See exactly what changed before touching the world</li>
+  <li>Preview remediation jobs before applying them</li>
+  <li>Restore legitimate builds after mistakes or abuse</li>
+  <li>Keep an auditable record of both player and admin actions</li>
+</ul>
+
+<hr>
+
+<h2>Support</h2>
+<p>If you need help, want to report a bug, or have suggestions, join the support Discord:</p>
+<p><a href="https://discord.gg/5365aHU7rt">https://discord.gg/5365aHU7rt</a></p>
