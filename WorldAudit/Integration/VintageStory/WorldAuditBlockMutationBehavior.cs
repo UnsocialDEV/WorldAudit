@@ -18,4 +18,15 @@ public sealed class WorldAuditBlockMutationBehavior : BlockBehavior
     {
         WorldAuditBlockMutationBehaviorRuntime.OnBlockRemoved(block, world, pos);
     }
+
+    public override bool OnBlockInteractStart(IWorldAccessor world, IPlayer byPlayer, BlockSelection blockSel, ref EnumHandling handling)
+    {
+        if (WorldAuditBlockMutationBehaviorRuntime.OnBlockInteractStart(byPlayer, blockSel))
+        {
+            handling = EnumHandling.PreventSubsequent;
+            return true;
+        }
+
+        return base.OnBlockInteractStart(world, byPlayer, blockSel, ref handling);
+    }
 }

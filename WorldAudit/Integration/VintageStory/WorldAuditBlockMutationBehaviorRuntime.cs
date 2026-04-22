@@ -5,25 +5,30 @@ namespace WorldAudit.Integration.VintageStory;
 
 internal static class WorldAuditBlockMutationBehaviorRuntime
 {
-    private static VintageStoryBlockMutationObserver? _observer;
+    private static VintageStoryBlockEventBridge? _bridge;
 
-    public static void Initialize(VintageStoryBlockMutationObserver observer)
+    public static void Initialize(VintageStoryBlockEventBridge bridge)
     {
-        _observer = observer;
+        _bridge = bridge;
     }
 
     public static void Reset()
     {
-        _observer = null;
+        _bridge = null;
     }
 
     public static void OnBlockPlaced(Block block, IWorldAccessor world, BlockPos pos)
     {
-        _observer?.OnBlockPlaced(block, world, pos);
+        _bridge?.OnObservedBlockPlaced(block, world, pos);
     }
 
     public static void OnBlockRemoved(Block block, IWorldAccessor world, BlockPos pos)
     {
-        _observer?.OnBlockRemoved(block, world, pos);
+        _bridge?.OnObservedBlockRemoved(block, world, pos);
+    }
+
+    public static bool OnBlockInteractStart(IPlayer player, BlockSelection blockSelection)
+    {
+        return _bridge?.OnObservedBlockInteractStart(player, blockSelection) ?? false;
     }
 }

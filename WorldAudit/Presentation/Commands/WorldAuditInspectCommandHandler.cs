@@ -11,6 +11,7 @@ internal sealed class WorldAuditInspectCommandHandler
 {
     private const int InspectPageSize = 3;
     private const int InspectHistoryLimit = 60;
+    private static readonly TimeSpan InspectFlushTimeout = TimeSpan.FromMilliseconds(50);
     private const string InspectModeIndicatorCode = "worldaudit-inspect-mode";
     private const string InspectModeIndicatorText = "[WorldAudit] Inspection mode enabled";
 
@@ -24,32 +25,45 @@ internal sealed class WorldAuditInspectCommandHandler
 
     public Task SendInspectHistoryAsync(IServerPlayer player, BlockPos pos)
     {
-        return WorldAuditSafeExecution.Run(
+        return WorldAuditSafeExecution.RunAsync(
             _context.Api,
             "inspect history",
-            () =>
+            async () =>
             {
                 var blockPosition = new BlockPosition(pos.X, pos.Y, pos.Z);
                 var worldId = _context.GetWorldId();
-                _context.Runtime.FlushAsync().GetAwaiter().GetResult();
-                var blockResults = _context.Runtime.BlockQueries
+                await TryFlushRecentAuditAsync().ConfigureAwait(false);
+                var blockResults = await _context.Runtime.BlockQueries
                     .GetHistoryAsync(worldId, blockPosition, limit: InspectHistoryLimit)
-                    .GetAwaiter()
-                    .GetResult();
-                var containerResults = _context.Runtime.ContainerQueries
+                    .ConfigureAwait(false);
+                var containerResults = await _context.Runtime.ContainerQueries
                     .GetHistoryAsync(worldId, blockPosition, limit: InspectHistoryLimit)
-                    .GetAwaiter()
-                    .GetResult();
+                    .ConfigureAwait(false);
 
-                SendInspectPage(player, pos, worldId, blockPosition, blockResults, containerResults);
-                ShowInspectModeIndicator(player);
-                return Task.CompletedTask;
+                await EnqueueMainThreadAsync(
+                    () =>
+                    {
+                        SendInspectPage(player, pos, worldId, blockPosition, blockResults, containerResults);
+                        ShowInspectModeIndicator(player);
+                    },
+                    "worldaudit-inspect-history").ConfigureAwait(false);
             },
             message =>
             {
-                player.SendMessage(0, message, EnumChatType.CommandError, null);
-                return Task.CompletedTask;
+                return EnqueueMainThreadAsync(
+                    () => player.SendMessage(0, message, EnumChatType.CommandError, null),
+                    "worldaudit-inspect-history-error");
             });
+    }
+
+    private async Task TryFlushRecentAuditAsync()
+    {
+        var flushTask = _context.Runtime.FlushAsync();
+        var completed = await Task.WhenAny(flushTask, Task.Delay(InspectFlushTimeout)).ConfigureAwait(false);
+        if (completed == flushTask)
+        {
+            await flushTask.ConfigureAwait(false);
+        }
     }
 
     public void ShowInspectModeIndicator(IServerPlayer player)
@@ -120,5 +134,35 @@ internal sealed class WorldAuditInspectCommandHandler
         {
             player.SendMessage(0, line, EnumChatType.CommandSuccess, null);
         }
+    }
+
+    private Task EnqueueMainThreadAsync(Action action, string code)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        ArgumentException.ThrowIfNullOrWhiteSpace(code);
+
+        if (_context.Api.Event is null)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _context.Api.Event.EnqueueMainThreadTask(
+            () =>
+            {
+                try
+                {
+                    action();
+                    completion.TrySetResult();
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            },
+            code);
+
+        return completion.Task;
     }
 }

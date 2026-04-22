@@ -14,6 +14,7 @@ internal sealed class WorldAuditRuntimeBinder
     private readonly Func<WorldAuditChatCommands?> _chatCommandsAccessor;
     private readonly Func<string> _worldIdAccessor;
     private readonly Action<string, Exception>? _failureReporter;
+    private readonly VintageStoryInteractionAttributionTracker _interactionTracker = new();
 
     public WorldAuditRuntimeBinder(
         ICoreServerAPI api,
@@ -43,6 +44,7 @@ internal sealed class WorldAuditRuntimeBinder
             () => _configAccessor()?.EnableFireCauseProvider ?? true,
             _worldIdAccessor,
             uid => _inspectorStateAccessor()?.IsEnabled(uid) ?? false,
+            _interactionTracker,
             new VintageStoryBlockEntitySnapshotCodec(_api.World));
     }
 
@@ -52,7 +54,9 @@ internal sealed class WorldAuditRuntimeBinder
             _api,
             runtime.ContainerCapture,
             () => _configAccessor()?.EnableContainerAudit ?? true,
-            _worldIdAccessor);
+            _worldIdAccessor,
+            uid => _inspectorStateAccessor()?.IsEnabled(uid) ?? false,
+            _interactionTracker);
     }
 
     public long RegisterRollbackTickListener(long currentListenerId, int intervalMilliseconds, Action tickAction)

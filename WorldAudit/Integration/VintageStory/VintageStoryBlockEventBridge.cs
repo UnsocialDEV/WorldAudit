@@ -10,19 +10,17 @@ namespace WorldAudit.Integration.VintageStory;
 public sealed class VintageStoryBlockEventBridge
 {
     private const string InspectDeniedClaimant = "worldauditinspectsilent";
-    private static readonly TimeSpan InspectAttemptCooldown = TimeSpan.FromMilliseconds(250);
 
     private readonly ICoreServerAPI _api;
-    private readonly System.Func<IServerPlayer, BlockPos, Task> _inspectHandler;
     private readonly Action<IServerPlayer> _inspectIndicatorHandler;
     private readonly System.Func<bool> _blockAuditEnabled;
     private readonly System.Func<string> _worldIdAccessor;
     private readonly System.Func<string, bool> _isInspectEnabled;
     private readonly BlockMutationScopeManager _scopeManager;
+    private readonly VintageStoryInteractionAttributionTracker _interactionTracker;
     private readonly VintageStoryBlockEntitySnapshotCodec _snapshotCodec;
     private readonly VintageStoryBlockMutationObserver _mutationObserver;
-    private readonly Dictionary<string, InspectAttempt> _recentInspectAttempts = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _inspectAttemptSync = new();
+    private readonly VintageStoryInspectRequestDispatcher _inspectDispatcher;
 
     public VintageStoryBlockEventBridge(
         ICoreServerAPI api,
@@ -34,16 +32,20 @@ public sealed class VintageStoryBlockEventBridge
         System.Func<bool> fireCauseProviderEnabled,
         System.Func<string> worldIdAccessor,
         System.Func<string, bool> isInspectEnabled,
+        VintageStoryInteractionAttributionTracker interactionTracker,
         VintageStoryBlockEntitySnapshotCodec snapshotCodec)
     {
         _api = api;
         _scopeManager = scopeManager;
-        _inspectHandler = inspectHandler;
         _inspectIndicatorHandler = inspectIndicatorHandler;
         _blockAuditEnabled = blockAuditEnabled;
         _worldIdAccessor = worldIdAccessor;
         _isInspectEnabled = isInspectEnabled;
+        _interactionTracker = interactionTracker;
         _snapshotCodec = snapshotCodec;
+        _inspectDispatcher = new VintageStoryInspectRequestDispatcher(
+            inspectHandler,
+            (operation, exception) => _api?.Logger?.Error("[WorldAudit] {0} failed: {1}", operation, exception));
         _mutationObserver = new VintageStoryBlockMutationObserver(
             capture,
             scopeManager,
@@ -57,7 +59,7 @@ public sealed class VintageStoryBlockEventBridge
 
     public void Register()
     {
-        WorldAuditBlockMutationBehaviorRuntime.Initialize(_mutationObserver);
+        WorldAuditBlockMutationBehaviorRuntime.Initialize(this);
         _api.Event.CanPlaceOrBreakBlock += OnCanPlaceOrBreakBlock;
         _api.Event.BreakBlock += OnBreakBlock;
         _api.Event.DidUseBlock += OnDidUseBlock;
@@ -76,6 +78,48 @@ public sealed class VintageStoryBlockEventBridge
     public void FlushPendingMutations()
     {
         _mutationObserver.FlushPendingRemovals();
+    }
+
+    internal void OnObservedBlockPlaced(Block block, IWorldAccessor world, BlockPos pos)
+    {
+        _mutationObserver.OnBlockPlaced(block, world, pos);
+    }
+
+    internal void OnObservedBlockRemoved(Block block, IWorldAccessor world, BlockPos pos)
+    {
+        _mutationObserver.OnBlockRemoved(block, world, pos);
+    }
+
+    internal bool OnObservedBlockInteractStart(IPlayer byPlayer, BlockSelection blockSel)
+    {
+        try
+        {
+            if (byPlayer?.PlayerUID is null || blockSel?.Position is null)
+            {
+                return false;
+            }
+
+            if (ShouldConsumeContainerInspect(byPlayer, blockSel))
+            {
+                return true;
+            }
+
+            if (!_blockAuditEnabled())
+            {
+                return false;
+            }
+
+            var pos = blockSel.Position.Copy();
+            var oldSnapshot = _snapshotCodec.Capture(pos);
+            RecordInteraction(byPlayer.PlayerName, byPlayer.PlayerUID, pos, oldSnapshot);
+            SeedPlayerScope(byPlayer.PlayerName, byPlayer.PlayerUID, pos, oldSnapshot);
+            return false;
+        }
+        catch (Exception exception)
+        {
+            _api.Logger.Error("[WorldAudit] Block interaction scope seeding failed: {0}", exception);
+            return false;
+        }
     }
 
     private bool OnCanPlaceOrBreakBlock(IServerPlayer byPlayer, BlockSelection blockSel, out string claimant)
@@ -141,7 +185,15 @@ public sealed class VintageStoryBlockEventBridge
 
             if (_isInspectEnabled(byPlayer.PlayerUID))
             {
-                _inspectHandler(byPlayer, blockSel.Position.Copy()).GetAwaiter().GetResult();
+                if (!IsContainerTarget(blockSel.Position))
+                {
+                    _inspectDispatcher.TryDispatch(byPlayer, blockSel.Position.Copy());
+                }
+            }
+
+            if (_blockAuditEnabled())
+            {
+                RecordInteraction(byPlayer.PlayerName, byPlayer.PlayerUID, blockSel.Position.Copy(), null);
             }
         }
         catch (Exception exception)
@@ -157,23 +209,30 @@ public sealed class VintageStoryBlockEventBridge
             return;
         }
 
-        lock (_inspectAttemptSync)
-        {
-            _recentInspectAttempts.Remove(byPlayer.PlayerUID);
-        }
+        _inspectDispatcher.RemovePlayer(byPlayer.PlayerUID);
     }
 
     private void SeedPlayerScope(IServerPlayer byPlayer, BlockPos position, byte[]? oldBlockEntitySnapshot)
+    {
+        SeedPlayerScope(byPlayer.PlayerName, byPlayer.PlayerUID, position, oldBlockEntitySnapshot);
+    }
+
+    private void SeedPlayerScope(string actorName, string? actorExternalId, BlockPos position, byte[]? oldBlockEntitySnapshot)
     {
         var worldPosition = new BlockPosition(position.X, position.Y, position.Z);
         _scopeManager.SeedPositionScope(
             _worldIdAccessor(),
             worldPosition,
             BlockMutationScope.Player(
-                byPlayer.PlayerName,
-                byPlayer.PlayerUID,
+                actorName,
+                actorExternalId,
                 oldBlockEntitySnapshot,
                 DateTimeOffset.UtcNow.AddSeconds(1)));
+    }
+
+    private void RecordInteraction(string actorName, string? actorExternalId, BlockPos position, byte[]? oldBlockEntitySnapshot)
+    {
+        _interactionTracker.Record(_worldIdAccessor(), position, actorName, actorExternalId, oldBlockEntitySnapshot);
     }
 
     private void SafeShowInspectIndicator(IServerPlayer player)
@@ -190,32 +249,25 @@ public sealed class VintageStoryBlockEventBridge
 
     private void TriggerInspectIfNeeded(IServerPlayer player, BlockPos position)
     {
-        if (!ShouldTriggerInspect(player.PlayerUID, position))
-        {
-            return;
-        }
-
-        _inspectHandler(player, position).GetAwaiter().GetResult();
+        _inspectDispatcher.TryDispatch(player, position);
     }
 
-    private bool ShouldTriggerInspect(string playerUid, BlockPos position)
+    private bool ShouldConsumeContainerInspect(IPlayer byPlayer, BlockSelection blockSel)
     {
-        var now = DateTimeOffset.UtcNow;
-        var nextAttempt = new InspectAttempt(new BlockPosition(position.X, position.Y, position.Z), now);
-
-        lock (_inspectAttemptSync)
+        if (byPlayer is not IServerPlayer serverPlayer ||
+            !_isInspectEnabled(serverPlayer.PlayerUID) ||
+            !IsContainerTarget(blockSel.Position))
         {
-            if (_recentInspectAttempts.TryGetValue(playerUid, out var previous)
-                && previous.Position == nextAttempt.Position
-                && now - previous.OccurredAt < InspectAttemptCooldown)
-            {
-                return false;
-            }
-
-            _recentInspectAttempts[playerUid] = nextAttempt;
-            return true;
+            return false;
         }
+
+        TriggerInspectIfNeeded(serverPlayer, blockSel.Position.Copy());
+        SafeShowInspectIndicator(serverPlayer);
+        return true;
     }
 
-    private sealed record InspectAttempt(BlockPosition Position, DateTimeOffset OccurredAt);
+    private bool IsContainerTarget(BlockPos position)
+    {
+        return _api.World.BlockAccessor.GetBlockEntity(position) is IBlockEntityContainer;
+    }
 }

@@ -1,5 +1,6 @@
 using WorldAudit.Application;
 using System.Net;
+using WorldAudit.Mod;
 using WorldAudit.Mod.Telemetry;
 
 namespace WorldAudit.Tests;

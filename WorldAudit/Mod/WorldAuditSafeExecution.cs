@@ -4,6 +4,28 @@ namespace WorldAudit.Mod;
 
 internal static class WorldAuditSafeExecution
 {
+    public static async Task RunAsync(
+        ICoreServerAPI? api,
+        string operation,
+        Func<Task> action,
+        Func<string, Task>? onFailure = null)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        try
+        {
+            await action().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Log(api, operation, exception);
+            if (onFailure is not null)
+            {
+                await onFailure(BuildUserMessage(operation, exception)).ConfigureAwait(false);
+            }
+        }
+    }
+
     public static void Run(ICoreServerAPI? api, string operation, Action action, Action<string, Exception>? onFailure = null)
     {
         ArgumentNullException.ThrowIfNull(action);
