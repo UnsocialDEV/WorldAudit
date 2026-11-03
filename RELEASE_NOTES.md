@@ -1,5 +1,53 @@
 # WorldAudit Release Notes
 
+## 1.1.0 - 2026-11-03
+
+WorldAudit 1.1.0 improves player attribution, container history, and rollback safety for Vintage Story 1.22.7.
+
+### Requirements and installation
+
+- **Vintage Story 1.22.7**, server side. This release targets **.NET 10** and uses the Harmony library supplied with that game version. Other game versions are not verified.
+- Download **WorldAudit-vintagestory.zip** from this release's assets. Stop the server, back up the world and audit database, replace the previous WorldAudit ZIP in the server's `Mods` directory, then restart. Keep only one version installed.
+- Native SQLite libraries are bundled for Windows x64, Linux x64/ARM64, and macOS x64. Live server validation was performed on Windows x64; the other platforms were not exercised live.
+
+### Player attribution and history
+
+- Capture the acting player's name and UID around real server block, item, block-entity, and inventory operations. This fixes missing attribution for tree felling, multiblock doors, chiseling, block exchanges, and bulk changes.
+- Attribute shared-chest transfers to the player moving the items, rather than the last player who viewed the inventory. Track containers before direct use and correctly rebind them after replacement, unload, or reload.
+- Record paired-door state changes, including neighboring door links and toggles.
+- Use explicit game contexts for fire, explosions, gravity, liquids, decay, growth, and world generation. Retain initiating player UIDs where the game provides them; unsupported or unknown provenance remains `#unknown`.
+- Preserve dimension coordinates and distinguish solid and fluid block layers. Identify worlds by their stable save identifier instead of their display name.
+
+### Rollback, restore, and undo
+
+- Check the expected current block, layer, and block-entity state before applying a change. Refuse conflicting newer edits, missing snapshots, unloaded chunks, wrong-world jobs, and unsafe fluid displacement.
+- Replay solid cells without gameplay removal callbacks deleting unplanned multiblock parts. Door undo no longer removes a neighboring part outside the job or creates collateral `#unknown` history.
+- Restore native block-entity snapshots, including the 1.22.7 chisel snow-array serialization asymmetry and server collision boxes for rotated doors.
+- Roll back only the changed container slots, preserving other players' contents and normal food aging. Record item replacements as removal and addition, and suppress duplicate ordinary events during replay.
+- Build undo from the actual before/after changes. Persist those audit records and job results together; retry a failed database write without applying the world mutation twice.
+- Pause interrupted jobs on restart. Inspect `/wa job <id>`, resume with `/wa apply <id>`, or discard remaining work with `/wa cancel <id>`. Canceling previews releases their maintenance protection; reload is blocked while rollback jobs are active.
+
+### Upgrade notes
+
+- Schema 8 retains existing history but cancels unfinished legacy plans whose save/layer ownership cannot be verified. Legacy block entries with an unknown layer cannot be safely replayed.
+- Existing history stored under world names is retained separately and is not automatically reassociated with save identifiers. Previously missing snapshots and historical `#unknown` identities cannot be recovered.
+- A hard crash between changing the world and committing its audit result cannot be atomic across the game save and SQLite. Restart pauses unfinished jobs, and expected-state checks reject conflicting replays.
+
+### Validation
+
+- **142 unit tests passed.**
+- **8 scenarios passed on a fresh disposable Vintage Story 1.22.7 server**, with no server errors: ordinary attribution; tree logs and foliage; single doors; paired doors; rotated-door collision boxes; chisel conversion and voxel edits; shared-chest inventory packets; and protection of newer player changes. Applicable scenarios include rollback and undo checks.
+- The driver uses real server players, game handlers, inventories, world state, and persisted SQLite history. Client UI/authentication, multiplayer timing races, and third-party mod combinations were not tested. Mods that bypass these hooks through raw chunk writes or custom protocols may still require integration.
+- [Reproduce the server tests](https://github.com/UnsocialDEV/WorldAudit/blob/1acdd1580a375a2755a585b1c02ec5b24f875498/tests/WorldAudit.ServerTests/README.md).
+
+Source commit: [`1acdd15`](https://github.com/UnsocialDEV/WorldAudit/commit/1acdd1580a375a2755a585b1c02ec5b24f875498).
+
+The attached ZIP is the exact package tested on the disposable server. SHA-256:
+
+```text
+b35c5d13001ba9cb14c17bad0bf0a46a4cd52e1ed6ae991d1c32b07d8b1dff07
+```
+
 ## 1.0.0 - 2026-03-17
 
 Initial public release of WorldAudit for Vintage Story.
