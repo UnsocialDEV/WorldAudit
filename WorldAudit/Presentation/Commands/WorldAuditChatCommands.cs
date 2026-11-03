@@ -119,6 +119,14 @@ public sealed class WorldAuditChatCommands
             .HandleWith(_rollbackHandler.HandleApply)
             .EndSubCommand();
 
+        root.BeginSubCommand("cancel")
+            .WithDescription("Discard a preview or paused job without changing the world.")
+            .RequiresPlayer()
+            .RequiresPrivilege(WorldAuditPrivileges.Rollback)
+            .WithArgs([Api.ChatCommands.Parsers.OptionalAll("jobId")])
+            .HandleWith(_rollbackHandler.HandleCancel)
+            .EndSubCommand();
+
         root.BeginSubCommand("jobs")
             .WithDescription("Show recent rollback jobs.")
             .RequiresPlayer()

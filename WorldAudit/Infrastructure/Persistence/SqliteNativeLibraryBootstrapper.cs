@@ -30,15 +30,10 @@ internal static class SqliteNativeLibraryBootstrapper
                 return;
             }
 
-            var destinationPath = Path.Combine(nativeRoot, Path.GetFileName(libraryPath));
-            if (!string.Equals(libraryPath, destinationPath, StringComparison.OrdinalIgnoreCase))
-            {
-                Directory.CreateDirectory(nativeRoot);
-                File.Copy(libraryPath, destinationPath, overwrite: true);
-                libraryPath = destinationPath;
-            }
-
             _loadedHandle = NativeLibrary.Load(libraryPath);
+            // The game can already have a different e_sqlite3 loaded; bind our provider to our packaged build.
+            NativeLibrary.SetDllImportResolver(typeof(SQLitePCL.SQLite3Provider_e_sqlite3).Assembly,
+                (name, _, _) => name == "e_sqlite3" ? _loadedHandle : IntPtr.Zero);
         }
     }
 

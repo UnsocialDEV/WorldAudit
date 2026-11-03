@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GameDir Condition="'$(GameDir)' == ''">$(APPDATA)/Vintagestory</GameDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI" HintPath="$(GameDir)/VintagestoryAPI.dll" Private="false" />
+    <Reference Include="VintagestoryLib" HintPath="$(GameDir)/VintagestoryLib.dll" Private="false" />
+    <Reference Include="VSSurvivalMod" HintPath="$(GameDir)/Mods/VSSurvivalMod.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GameDir)/Lib/0Harmony.dll" Private="false" />
+    <Reference Include="WorldAudit" HintPath="../../WorldAudit/bin/Release/net10.0/vintagestory-package/WorldAudit.dll" Private="false" />
+    <Content Include="modinfo.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

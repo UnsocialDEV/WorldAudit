@@ -44,8 +44,9 @@ public sealed class RollbackExecutionCoordinator
         {
             return null;
         }
+        ValidateWorld(job.WorldId);
 
-        if (job.State is RollbackJobState.Completed or RollbackJobState.CompletedWithConflicts or RollbackJobState.Failed)
+        if (job.State is RollbackJobState.Completed or RollbackJobState.CompletedWithConflicts or RollbackJobState.Failed or RollbackJobState.Cancelled)
         {
             return job;
         }
@@ -59,11 +60,13 @@ public sealed class RollbackExecutionCoordinator
         }
 
         var plannedEntries = await _repository.GetRollbackPlanEntriesAsync(jobId, cancellationToken).ConfigureAwait(false);
+        if (plannedEntries.Any(entry => !string.Equals(entry.WorldId, job.WorldId, StringComparison.Ordinal)))
+            throw new InvalidOperationException("The job contains entries from another world.");
         if (plannedEntries.Count == 0)
         {
             await _repository.UpdateRollbackJobStateAsync(
                 jobId,
-                RollbackJobState.Completed,
+                HasConflictsOrFailures(job) ? RollbackJobState.CompletedWithConflicts : RollbackJobState.Completed,
                 completedAt: DateTimeOffset.UtcNow,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             return await _repository.GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false);
@@ -99,15 +102,56 @@ public sealed class RollbackExecutionCoordinator
         }
     }
 
+    public async Task<RollbackJob?> CancelAsync(long jobId, CancellationToken cancellationToken = default)
+    {
+        var job = await _repository.GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+        if (job is null) return null;
+        ValidateWorld(job.WorldId);
+        if (job.State is not (RollbackJobState.Previewed or RollbackJobState.Paused))
+        {
+            throw new InvalidOperationException("Only previewed or paused jobs can be cancelled.");
+        }
+        await _repository.UpdateRollbackJobStateAsync(jobId, RollbackJobState.Cancelled,
+            completedAt: DateTimeOffset.UtcNow, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return await _repository.GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+    }
+
     public bool HasActiveJobs()
     {
         return GetActiveJobCount() > 0;
     }
 
+    private void ValidateWorld(string worldId)
+    {
+        if (!string.IsNullOrWhiteSpace(_options.WorldId) && !string.Equals(_options.WorldId, worldId, StringComparison.Ordinal))
+            throw new InvalidOperationException("This job belongs to another world.");
+    }
+
+    public async Task SuspendAsync(CancellationToken cancellationToken = default)
+    {
+        QueuedRollbackJob[] jobs;
+        lock (_sync)
+        {
+            jobs = _activeJob is null ? _queuedJobs.ToArray() : new[] { _activeJob }.Concat(_queuedJobs).ToArray();
+        }
+        foreach (var job in jobs)
+        {
+            await PersistUpdatesAsync(job, cancellationToken).ConfigureAwait(false);
+            await _repository.UpdateRollbackJobStateAsync(job.JobId, RollbackJobState.Paused,
+                lastError: "Server stopped. Use /wa apply to resume or /wa cancel to discard remaining entries.",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        lock (_sync)
+        {
+            _activeJob = null;
+            _queuedJobs.Clear();
+            _queuedJobIds.Clear();
+        }
+    }
+
     public async Task ProcessTickAsync(CancellationToken cancellationToken = default)
     {
         QueuedRollbackJob? jobToRun;
-        var transitionedToRunning = false;
 
         lock (_sync)
         {
@@ -115,7 +159,6 @@ public sealed class RollbackExecutionCoordinator
             {
                 _activeJob = _queuedJobs.Dequeue();
                 _queuedJobIds.Remove(_activeJob.JobId);
-                transitionedToRunning = true;
             }
 
             jobToRun = _activeJob;
@@ -126,13 +169,19 @@ public sealed class RollbackExecutionCoordinator
             return;
         }
 
-        if (transitionedToRunning)
+        if (!jobToRun.RunningStatePersisted)
         {
             await _repository.UpdateRollbackJobStateAsync(
                 jobToRun.JobId,
                 RollbackJobState.Running,
                 startedAt: DateTimeOffset.UtcNow,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            jobToRun.RunningStatePersisted = true;
+        }
+
+        if (jobToRun.UnpersistedUpdates.Count > 0)
+        {
+            await PersistUpdatesAsync(jobToRun, cancellationToken).ConfigureAwait(false);
         }
 
         var batch = BuildNextBatch(jobToRun);
@@ -142,24 +191,22 @@ public sealed class RollbackExecutionCoordinator
             return;
         }
 
-        var updates = new List<RollbackBatchEntryUpdate>(batch.Count);
         foreach (var entry in batch)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
             try
             {
                 using var mutationScope = _mutationGuard.Begin(entry.WorldId, entry.Position);
                 switch (entry)
                 {
                     case RollbackBlockPlanEntry blockEntry:
-                        updates.Add(await ApplyBlockEntryAsync(blockEntry, cancellationToken).ConfigureAwait(false));
+                        jobToRun.UnpersistedUpdates.Add(await ApplyBlockEntryAsync(blockEntry, CancellationToken.None).ConfigureAwait(false));
                         break;
                     case RollbackContainerPlanEntry containerEntry:
-                        updates.Add(await ApplyContainerEntryAsync(containerEntry, cancellationToken).ConfigureAwait(false));
+                        jobToRun.UnpersistedUpdates.Add(await ApplyContainerEntryAsync(containerEntry, CancellationToken.None).ConfigureAwait(false));
                         break;
                     default:
-                        updates.Add(new RollbackBatchEntryUpdate(
+                        jobToRun.UnpersistedUpdates.Add(new RollbackBatchEntryUpdate(
                             entry.JobEntryId,
                             entry.TargetType,
                             RollbackJobEntryResult.Failed,
@@ -169,36 +216,21 @@ public sealed class RollbackExecutionCoordinator
             }
             catch (Exception exception)
             {
-                updates.Add(new RollbackBatchEntryUpdate(entry.JobEntryId, entry.TargetType, RollbackJobEntryResult.Failed, exception.Message));
+                jobToRun.UnpersistedUpdates.Add(new RollbackBatchEntryUpdate(entry.JobEntryId, entry.TargetType, RollbackJobEntryResult.Failed, exception.Message));
             }
+            lock (_sync) jobToRun.PendingEntries.Dequeue();
         }
 
-        await _repository.RecordRollbackBatchAsync(jobToRun.JobId, updates, cancellationToken).ConfigureAwait(false);
+        await PersistUpdatesAsync(jobToRun, cancellationToken).ConfigureAwait(false);
+        if (jobToRun.PendingEntries.Count == 0)
+            await CompleteActiveJobAsync(jobToRun.JobId, cancellationToken).ConfigureAwait(false);
+    }
 
-        var shouldComplete = false;
-        lock (_sync)
-        {
-            if (_activeJob?.JobId == jobToRun.JobId && jobToRun.PendingEntries.Count == 0)
-            {
-                shouldComplete = true;
-                _activeJob = null;
-            }
-        }
-
-        if (shouldComplete)
-        {
-            var updatedJob = await _repository.GetRollbackJobAsync(jobToRun.JobId, cancellationToken).ConfigureAwait(false);
-            var finalState = updatedJob is not null && HasConflictsOrFailures(updatedJob)
-                ? RollbackJobState.CompletedWithConflicts
-                : RollbackJobState.Completed;
-
-            await _repository.UpdateRollbackJobStateAsync(
-                jobToRun.JobId,
-                finalState,
-                completedAt: DateTimeOffset.UtcNow,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            await _auditWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
+    private async Task PersistUpdatesAsync(QueuedRollbackJob job, CancellationToken cancellationToken)
+    {
+        // A failed write must be retried without applying the world mutations a second time.
+        await _repository.RecordRollbackBatchAsync(job.JobId, job.UnpersistedUpdates, cancellationToken).ConfigureAwait(false);
+        job.UnpersistedUpdates.Clear();
     }
 
     private List<RollbackPlanEntry> BuildNextBatch(QueuedRollbackJob jobToRun)
@@ -211,19 +243,18 @@ public sealed class RollbackExecutionCoordinator
                 return batch;
             }
 
-            batch.Add(jobToRun.PendingEntries.Dequeue());
+            batch.Add(jobToRun.PendingEntries.Peek());
             if (batch[0] is not RollbackBlockPlanEntry firstBlockEntry)
             {
                 return batch;
             }
 
-            while (_activeJob?.JobId == jobToRun.JobId
-                && batch.Count < _options.RollbackMaxBlocksPerTick
-                && jobToRun.PendingEntries.Count > 0
-                && jobToRun.PendingEntries.Peek() is RollbackBlockPlanEntry nextBlockEntry
-                && nextBlockEntry.Chunk.Equals(firstBlockEntry.Chunk))
+            foreach (var candidate in jobToRun.PendingEntries.Skip(1))
             {
-                batch.Add(jobToRun.PendingEntries.Dequeue());
+                if (batch.Count >= _options.RollbackMaxBlocksPerTick
+                    || candidate is not RollbackBlockPlanEntry nextBlockEntry
+                    || !nextBlockEntry.Chunk.Equals(firstBlockEntry.Chunk)) break;
+                batch.Add(candidate);
             }
         }
 
@@ -235,47 +266,27 @@ public sealed class RollbackExecutionCoordinator
         CancellationToken cancellationToken)
     {
         var applyResult = await _blockApplier.ApplyAsync(entry, cancellationToken).ConfigureAwait(false);
-        if (applyResult.Status == RollbackBlockApplyStatus.Failed)
-        {
-            return new RollbackBatchEntryUpdate(
-                entry.JobEntryId,
-                RollbackJobEntryTargetType.Block,
-                RollbackJobEntryResult.Failed,
-                applyResult.ErrorText ?? $"Unknown {DescribeOperation(entry.Operation)} apply failure.");
-        }
-
-        if (applyResult.Status == RollbackBlockApplyStatus.Conflict)
-        {
-            return new RollbackBatchEntryUpdate(
-                entry.JobEntryId,
-                RollbackJobEntryTargetType.Block,
-                RollbackJobEntryResult.Conflict,
-                applyResult.ErrorText ?? $"{ToTitleCase(entry.Operation)} apply conflict.");
-        }
-
+        BlockAuditEvent? mutation = null;
         if (applyResult.ChangedWorld)
         {
-            var auditCause = entry.Operation == RollbackJobOperation.Rollback ? AuditCause.Rollback : AuditCause.Restore;
-            var actor = entry.Operation == RollbackJobOperation.Rollback ? RollbackActor : RestoreActor;
-            await _auditWriter.QueueBlockEventAsync(
-                new BlockAuditEvent(
-                    Id: null,
-                    WorldId: entry.WorldId,
-                    Position: entry.Position,
-                    OccurredAt: DateTimeOffset.UtcNow,
-                    Actor: actor,
-                    Cause: auditCause,
-                    Action: BlockAuditAction.Restore,
-                    OldBlockCode: applyResult.PreviousBlockCode,
-                    NewBlockCode: entry.TargetBlockCode,
-                    OldBlockEntitySnapshot: null,
-                    NewBlockEntitySnapshot: entry.TargetBlockEntitySnapshot,
-                    SourceJobId: entry.JobId,
-                    SourceEventId: entry.SourceEventId),
-                cancellationToken).ConfigureAwait(false);
+            mutation = new BlockAuditEvent(
+                Id: null, WorldId: entry.WorldId, Position: entry.Position, OccurredAt: DateTimeOffset.UtcNow,
+                Actor: entry.Operation == RollbackJobOperation.Rollback ? RollbackActor : RestoreActor,
+                Cause: entry.Operation == RollbackJobOperation.Rollback ? AuditCause.Rollback : AuditCause.Restore,
+                Action: BlockAuditAction.Restore,
+                OldBlockCode: applyResult.PreviousBlockCode,
+                NewBlockCode: applyResult.ActualBlockCode,
+                OldBlockEntitySnapshot: applyResult.PreviousBlockEntitySnapshot,
+                NewBlockEntitySnapshot: applyResult.ActualBlockEntitySnapshot,
+                SourceJobId: entry.JobId, SourceEventId: entry.SourceEventId, Layer: entry.Layer);
         }
-
-        return new RollbackBatchEntryUpdate(entry.JobEntryId, RollbackJobEntryTargetType.Block, RollbackJobEntryResult.Applied);
+        var result = applyResult.Status switch
+        {
+            RollbackBlockApplyStatus.Applied => RollbackJobEntryResult.Applied,
+            RollbackBlockApplyStatus.Conflict => RollbackJobEntryResult.Conflict,
+            _ => RollbackJobEntryResult.Failed
+        };
+        return new RollbackBatchEntryUpdate(entry.JobEntryId, entry.TargetType, result, applyResult.ErrorText, BlockMutation: mutation);
     }
 
     private async Task<RollbackBatchEntryUpdate> ApplyContainerEntryAsync(
@@ -283,58 +294,30 @@ public sealed class RollbackExecutionCoordinator
         CancellationToken cancellationToken)
     {
         var applyResult = await _containerApplier.ApplyAsync(entry, cancellationToken).ConfigureAwait(false);
-        if (applyResult.Status == RollbackContainerApplyStatus.Failed)
-        {
-            return new RollbackBatchEntryUpdate(
-                entry.JobEntryId,
-                RollbackJobEntryTargetType.Container,
-                RollbackJobEntryResult.Failed,
-                applyResult.ErrorText ?? $"Unknown {DescribeOperation(entry.Operation)} container apply failure.");
-        }
-
-        if (applyResult.Status == RollbackContainerApplyStatus.Conflict)
-        {
-            return new RollbackBatchEntryUpdate(
-                entry.JobEntryId,
-                RollbackJobEntryTargetType.Container,
-                RollbackJobEntryResult.Conflict,
-                applyResult.ErrorText ?? $"{ToTitleCase(entry.Operation)} container apply conflict.");
-        }
-
+        ContainerAuditTransaction? mutation = null;
         if (applyResult.ChangedWorld)
         {
-            var auditCause = entry.Operation == RollbackJobOperation.Rollback ? AuditCause.Rollback : AuditCause.Restore;
-            var actor = entry.Operation == RollbackJobOperation.Rollback ? RollbackActor : RestoreActor;
-            await _auditWriter.QueueContainerTransactionAsync(
-                new ContainerAuditTransaction(
-                    Id: null,
-                    WorldId: entry.WorldId,
-                    Position: entry.Position,
-                    OccurredAt: DateTimeOffset.UtcNow,
-                    Actor: actor,
-                    Cause: auditCause,
-                    InventoryType: entry.InventoryType,
-                    ContainerLabel: entry.ContainerLabel,
-                    BeforeSnapshot: applyResult.PreviousSnapshot,
-                    AfterSnapshot: entry.TargetSnapshot,
-                    Lines: BuildContainerLines(applyResult.PreviousSnapshot, entry.TargetSnapshot),
-                    SourceJobId: entry.JobId),
-                cancellationToken).ConfigureAwait(false);
+            mutation = new ContainerAuditTransaction(
+                Id: null, WorldId: entry.WorldId, Position: entry.Position, OccurredAt: DateTimeOffset.UtcNow,
+                Actor: entry.Operation == RollbackJobOperation.Rollback ? RollbackActor : RestoreActor,
+                Cause: entry.Operation == RollbackJobOperation.Rollback ? AuditCause.Rollback : AuditCause.Restore,
+                InventoryType: entry.InventoryType, ContainerLabel: entry.ContainerLabel,
+                BeforeSnapshot: applyResult.PreviousSnapshot,
+                AfterSnapshot: applyResult.ActualSnapshot,
+                Lines: BuildContainerLines(applyResult.PreviousSnapshot, applyResult.ActualSnapshot),
+                SourceJobId: entry.JobId);
         }
-
-        return new RollbackBatchEntryUpdate(entry.JobEntryId, RollbackJobEntryTargetType.Container, RollbackJobEntryResult.Applied);
+        var result = applyResult.Status switch
+        {
+            RollbackContainerApplyStatus.Applied => RollbackJobEntryResult.Applied,
+            RollbackContainerApplyStatus.Conflict => RollbackJobEntryResult.Conflict,
+            _ => RollbackJobEntryResult.Failed
+        };
+        return new RollbackBatchEntryUpdate(entry.JobEntryId, entry.TargetType, result, applyResult.ErrorText, ContainerMutation: mutation);
     }
 
     private async Task CompleteActiveJobAsync(long jobId, CancellationToken cancellationToken)
     {
-        lock (_sync)
-        {
-            if (_activeJob?.JobId == jobId)
-            {
-                _activeJob = null;
-            }
-        }
-
         var job = await _repository.GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false);
         var finalState = job is not null && HasConflictsOrFailures(job)
             ? RollbackJobState.CompletedWithConflicts
@@ -346,6 +329,15 @@ public sealed class RollbackExecutionCoordinator
             completedAt: DateTimeOffset.UtcNow,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         await _auditWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
+        lock (_sync)
+        {
+            if (_activeJob?.JobId == jobId)
+            {
+                _activeJob = null;
+            }
+        }
+
+
     }
 
     private static bool HasConflictsOrFailures(RollbackJob job)
@@ -374,6 +366,16 @@ public sealed class RollbackExecutionCoordinator
 
             if (SnapshotsEqual(beforeSlot, afterSlot))
             {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(beforeSlot.ItemCode) && !string.IsNullOrWhiteSpace(afterSlot.ItemCode)
+                && !string.Equals(beforeSlot.ItemCode, afterSlot.ItemCode, StringComparison.OrdinalIgnoreCase))
+            {
+                lines.Add(new ContainerAuditLine(null, beforeSlot.ItemCode, slotId, -beforeSlot.Quantity,
+                    beforeSlot.Quantity, 0, beforeSlot.StackBytes, null));
+                lines.Add(new ContainerAuditLine(null, afterSlot.ItemCode, slotId, afterSlot.Quantity,
+                    0, afterSlot.Quantity, null, afterSlot.StackBytes));
                 continue;
             }
 
@@ -450,16 +452,6 @@ public sealed class RollbackExecutionCoordinator
         return true;
     }
 
-    private static string DescribeOperation(RollbackJobOperation operation)
-    {
-        return operation == RollbackJobOperation.Rollback ? "rollback" : "restore";
-    }
-
-    private static string ToTitleCase(RollbackJobOperation operation)
-    {
-        return operation == RollbackJobOperation.Rollback ? "Rollback" : "Restore";
-    }
-
     private sealed class QueuedRollbackJob
     {
         public QueuedRollbackJob(long jobId, Queue<RollbackPlanEntry> pendingEntries)
@@ -471,6 +463,10 @@ public sealed class RollbackExecutionCoordinator
         public long JobId { get; }
 
         public Queue<RollbackPlanEntry> PendingEntries { get; }
+
+        public List<RollbackBatchEntryUpdate> UnpersistedUpdates { get; } = [];
+
+        public bool RunningStatePersisted { get; set; }
     }
 
     private sealed record SnapshotSlot(int SlotId, string? ItemCode, int Quantity, byte[]? StackBytes);

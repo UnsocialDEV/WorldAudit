@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Configurations>Debug;Release;AnyCPU</Configurations>
@@ -17,10 +17,12 @@
 
   <ItemGroup>
     <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.44" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="0Harmony" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Lib/0Harmony.dll" Private="false" />
     <Reference Include="VintagestoryAPI">
       <HintPath>$(VintageStoryApiPath)</HintPath>
       <Private>true</Private>

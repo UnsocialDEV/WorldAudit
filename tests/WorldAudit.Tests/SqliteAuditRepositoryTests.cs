@@ -8,6 +8,23 @@ namespace WorldAudit.Tests;
 
 public sealed class SqliteAuditRepositoryTests : IAsyncLifetime
 {
+    [Fact]
+    public async Task QueriesAndRollbackSelectionSeparateDimensionsAndSavegames()
+    {
+        var center = new BlockPosition(10, 65, 10);
+        var otherDimension = new BlockPosition(10, 32768 + 65, 10);
+        foreach (var (world, position) in new[] { ("save-a", center), ("save-a", otherDimension), ("save-b", center) })
+            await _runtime.BlockCapture.CaptureAsync(BlockChangeCaptureContext.PlayerPlaced(world, position,
+                DateTimeOffset.UtcNow, "Alice", "alice", "game:dirt"));
+        await _runtime.FlushAsync();
+        var history = await _runtime.Repository.GetBlockHistoryAsync(new BlockHistoryQuery("save-a", otherDimension));
+        Assert.Equal(otherDimension, Assert.Single(history).Position);
+        var lookup = await _runtime.Repository.LookupBlockEventsAsync(new BlockLookupQuery("save-a", center, 40000));
+        Assert.Equal(center, Assert.Single(lookup).Position);
+        var plan = await _runtime.Repository.SelectRollbackBlockEventsAsync(new RollbackBlockSelectionQuery("save-a", center, 40000));
+        Assert.Equal(center, Assert.Single(plan).Position);
+    }
+
     private string _databasePath = null!;
     private WorldAuditRuntime _runtime = null!;
 

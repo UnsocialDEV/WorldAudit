@@ -12,206 +12,286 @@ namespace WorldAudit.Tests;
 public sealed class VintageStoryContainerEventBridgeTests
 {
     [Fact]
-    public void SlotModified_AfterDidUseBlock_UsesRecentPlayerInteraction()
+    public void SlotModified_UsesExecutingPlayerDespiteAnotherPlayersClickAndOpenSession()
     {
-        var inventory = CreateInventory("inventory-1", "inventory-generic", new BlockPos(5, 65, 5));
-        var blockCode = new AssetLocation("game", "groundstorage");
-        var container = new TestBlockEntityContainer(inventory, "groundstorage");
-        var api = CreateServerApi(container, blockCode);
-        var capture = new FakeContainerCapture();
-        var bridge = new VintageStoryContainerEventBridge(
-            api,
-            capture,
-            () => true,
-            () => "main",
-            _ => false,
-            new VintageStoryInteractionAttributionTracker());
-        var player = CreateServerPlayer("player-1", "Dayton");
-        var selection = new BlockSelection { Position = new BlockPos(5, 65, 5) };
+        using var fixture = new ContainerTestFixture();
+        var alice = ContainerTestFixture.Player("alice", "Alice");
+        var bob = ContainerTestFixture.Player("bob", "Bob");
+        fixture.Bridge.TrackAt(fixture.Position);
+        fixture.Inventory.Open(alice);
+        fixture.Inventory.Open(bob);
+        DidUse(fixture.Bridge, bob, fixture.Position);
 
-        InvokeDidUseBlock(bridge, player, selection);
-        inventory[0].Itemstack = CreateStack("game:torch", 1);
-        InvokeOnSlotModified(bridge, inventory, 0);
+        using (fixture.Scopes.BeginAmbientScope(BlockMutationScope.Player("Alice", "alice")))
+            fixture.Change(0, fixture.Stack("game:torch", 1));
+        fixture.Inventory.Close(alice);
+        fixture.Inventory.Close(bob);
 
-        var context = Assert.Single(capture.Contexts);
-        Assert.Equal("Dayton", context.ActorName);
-        Assert.Equal("player-1", context.ActorExternalId);
+        var context = Assert.Single(fixture.Capture.Contexts);
+        Assert.Equal("Alice", context.ActorName);
+        Assert.Equal("alice", context.ActorExternalId);
         Assert.Equal(AuditCause.Player, context.Cause);
-        Assert.Equal("groundstorage", context.InventoryType);
-        Assert.Equal("game:groundstorage", context.ContainerLabel);
-        Assert.Single(context.Lines);
-        Assert.Equal("game:torch", context.Lines[0].ItemCode);
-        Assert.Equal(1, context.Lines[0].QuantityDelta);
+        Assert.Equal(1, Assert.Single(context.Lines).QuantityDelta);
     }
 
     [Fact]
-    public void SlotModified_WithConflictingRecentInteractions_FallsBackToUnknown()
+    public void SlotModified_WithoutExecutingPlayer_DoesNotBlameRecentClickOrSoleOpener()
     {
-        var inventory = CreateInventory("inventory-2", "inventory-generic", new BlockPos(9, 65, 9));
-        var blockCode = new AssetLocation("game", "toolrack");
-        var container = new TestBlockEntityContainer(inventory, "toolrack");
-        var api = CreateServerApi(container, blockCode);
-        var capture = new FakeContainerCapture();
-        var clock = DateTimeOffset.UtcNow;
-        var tracker = new VintageStoryInteractionAttributionTracker(() => clock);
-        var bridge = new VintageStoryContainerEventBridge(api, capture, () => true, () => "main", _ => false, tracker);
+        using var fixture = new ContainerTestFixture();
+        var bob = ContainerTestFixture.Player("bob", "Bob");
+        DidUse(fixture.Bridge, bob, fixture.Position);
+        fixture.Inventory.Open(bob);
 
-        InvokeDidUseBlock(bridge, CreateServerPlayer("player-1", "First"), new BlockSelection { Position = new BlockPos(9, 65, 9) });
-        clock = clock.AddMilliseconds(100);
-        InvokeDidUseBlock(bridge, CreateServerPlayer("player-2", "Second"), new BlockSelection { Position = new BlockPos(9, 65, 9) });
-        inventory[0].Itemstack = CreateStack("game:hammer", 1);
-        InvokeOnSlotModified(bridge, inventory, 0);
+        fixture.Change(0, fixture.Stack("game:hammer", 1));
+        fixture.Inventory.Close(bob);
 
-        var context = Assert.Single(capture.Contexts);
+        var context = Assert.Single(fixture.Capture.Contexts);
         Assert.Equal("#unknown", context.ActorName);
         Assert.Null(context.ActorExternalId);
         Assert.Equal(AuditCause.Unknown, context.Cause);
     }
 
     [Fact]
+    public void TrackAt_BeforeFirstDirectUse_CapturesInitialAdditionBeforeDidUseBlock()
+    {
+        using var fixture = new ContainerTestFixture("groundstorage");
+        fixture.Bridge.TrackAt(fixture.Position);
+        using (fixture.Scopes.BeginAmbientScope(BlockMutationScope.Player("Alice", "alice")))
+            fixture.Change(0, fixture.Stack("game:torch", 1));
+        DidUse(fixture.Bridge, ContainerTestFixture.Player("alice", "Alice"), fixture.Position);
+
+        var context = Assert.Single(fixture.Capture.Contexts);
+        Assert.Equal("groundstorage", context.InventoryType);
+        Assert.Equal("game:groundstorage", context.ContainerLabel);
+        var line = Assert.Single(context.Lines);
+        Assert.Equal(0, line.BeforeQuantity);
+        Assert.Equal(1, line.AfterQuantity);
+        Assert.Null(line.StackBeforeSnapshot);
+        Assert.NotNull(line.StackAfterSnapshot);
+    }
+
+    [Fact]
+    public void TrackAt_LastItemRemoval_CapturesEvenWhenBlockEntityHasDisappeared()
+    {
+        using var fixture = new ContainerTestFixture("groundstorage");
+        fixture.Inventory[0].Itemstack = fixture.Stack("game:torch", 1);
+        fixture.Bridge.TrackAt(fixture.Position);
+        fixture.Container = null;
+        using (fixture.Scopes.BeginAmbientScope(BlockMutationScope.Player("Alice", "alice")))
+            fixture.Change(0, null);
+        DidUse(fixture.Bridge, ContainerTestFixture.Player("alice", "Alice"), fixture.Position);
+
+        var context = Assert.Single(fixture.Capture.Contexts);
+        Assert.Equal("alice", context.ActorExternalId);
+        Assert.Equal(new BlockPosition(5, 65, 5), context.Position);
+        var line = Assert.Single(context.Lines);
+        Assert.Equal(-1, line.QuantityDelta);
+        Assert.Equal("game:torch", line.ItemCode);
+        Assert.NotNull(line.StackBeforeSnapshot);
+        Assert.Null(line.StackAfterSnapshot);
+    }
+
+    [Fact]
+    public void TrackInventory_ReplacementWithSameId_DetachesOldAndCapturesNewInstance()
+    {
+        using var fixture = new ContainerTestFixture();
+        var original = fixture.Inventory;
+        original[0].Itemstack = fixture.Stack("game:stone", 9);
+        fixture.Bridge.TrackInventory(original);
+        var replacement = fixture.NewInventory();
+        replacement[0].Itemstack = fixture.Stack("game:torch", 2);
+        Assert.Equal(original.InventoryID, replacement.InventoryID);
+        fixture.Bridge.TrackInventory(replacement);
+        // A late unload notification for the old instance must not detach the replacement.
+        fixture.Bridge.UntrackInventory(original);
+
+        original[0].Itemstack = fixture.Stack("game:stone", 8);
+        original.DidModifyItemSlot(original[0]);
+        replacement[0].Itemstack = fixture.Stack("game:torch", 3);
+        replacement.DidModifyItemSlot(replacement[0]);
+
+        Assert.Same(replacement, Assert.Single(fixture.Bridge.TrackedInventories));
+        var line = Assert.Single(Assert.Single(fixture.Capture.Contexts).Lines);
+        Assert.Equal("game:torch", line.ItemCode);
+        Assert.Equal(2, line.BeforeQuantity);
+        Assert.Equal(3, line.AfterQuantity);
+    }
+
+    [Fact]
+    public void Unregister_DetachesSlotOpenAndCloseHandlers()
+    {
+        using var fixture = new ContainerTestFixture();
+        var player = ContainerTestFixture.Player("alice", "Alice");
+        fixture.Bridge.TrackInventory(fixture.Inventory);
+        fixture.Inventory.Open(player);
+        fixture.Bridge.Unregister();
+
+        fixture.Change(0, fixture.Stack("game:torch", 1));
+        fixture.Inventory.Close(player);
+        fixture.Inventory.Open(player);
+        fixture.Change(0, fixture.Stack("game:torch", 2));
+
+        Assert.Empty(fixture.Capture.Contexts);
+        Assert.Empty(fixture.Bridge.TrackedInventories);
+    }
+
+    [Fact]
+    public void SlotModified_DifferentItemsWithEqualCounts_RecordsRemovalAndAddition()
+    {
+        using var fixture = new ContainerTestFixture();
+        fixture.Inventory[0].Itemstack = fixture.Stack("game:diamond", 10);
+        fixture.Bridge.TrackInventory(fixture.Inventory);
+
+        fixture.Change(0, fixture.Stack("game:dirt", 10));
+
+        var context = Assert.Single(fixture.Capture.Contexts);
+        Assert.Collection(context.Lines,
+            removal =>
+            {
+                Assert.Equal("game:diamond", removal.ItemCode);
+                Assert.Equal(0, removal.SlotId);
+                Assert.Equal(-10, removal.QuantityDelta);
+                Assert.Equal(10, removal.BeforeQuantity);
+                Assert.Equal(0, removal.AfterQuantity);
+                Assert.NotNull(removal.StackBeforeSnapshot);
+                Assert.Null(removal.StackAfterSnapshot);
+            },
+            addition =>
+            {
+                Assert.Equal("game:dirt", addition.ItemCode);
+                Assert.Equal(0, addition.SlotId);
+                Assert.Equal(10, addition.QuantityDelta);
+                Assert.Equal(0, addition.BeforeQuantity);
+                Assert.Equal(10, addition.AfterQuantity);
+                Assert.Null(addition.StackBeforeSnapshot);
+                Assert.NotNull(addition.StackAfterSnapshot);
+            });
+    }
+
+    [Fact]
     public void DidUseBlock_InspectMode_DoesNotStartContainerTracking()
     {
-        var inventory = CreateInventory("inventory-3", "inventory-generic", new BlockPos(5, 65, 5));
-        var blockCode = new AssetLocation("game", "chest");
-        var container = new TestBlockEntityContainer(inventory, "chest");
-        var api = CreateServerApi(container, blockCode);
-        var capture = new FakeContainerCapture();
-        var bridge = new VintageStoryContainerEventBridge(
-            api,
-            capture,
-            () => true,
-            () => "main",
-            _ => true,
-            new VintageStoryInteractionAttributionTracker());
-        var player = CreateServerPlayer("player-1", "Dayton");
-        var selection = new BlockSelection { Position = new BlockPos(5, 65, 5) };
+        using var fixture = new ContainerTestFixture(inspecting: true);
+        DidUse(fixture.Bridge, ContainerTestFixture.Player("alice", "Alice"), fixture.Position);
+        fixture.Change(0, fixture.Stack("game:torch", 1));
 
-        InvokeDidUseBlock(bridge, player, selection);
-        inventory[0].Itemstack = CreateStack("game:torch", 1);
-        InvokeOnSlotModified(bridge, inventory, 0);
-
-        Assert.Empty(capture.Contexts);
+        Assert.Empty(fixture.Capture.Contexts);
+        Assert.Empty(fixture.Bridge.TrackedInventories);
     }
 
-    private static void InvokeDidUseBlock(VintageStoryContainerEventBridge bridge, IServerPlayer player, BlockSelection selection)
-    {
-        var method = typeof(VintageStoryContainerEventBridge).GetMethod("OnDidUseBlock", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("OnDidUseBlock was not found.");
-        method.Invoke(bridge, [player, selection]);
-    }
+    private static void DidUse(VintageStoryContainerEventBridge bridge, IServerPlayer player, BlockPos position)
+        => typeof(VintageStoryContainerEventBridge)
+            .GetMethod("OnDidUseBlock", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(bridge, [player, new BlockSelection { Position = position }]);
+}
 
-    private static void InvokeOnSlotModified(VintageStoryContainerEventBridge bridge, InventoryBase inventory, int slotId)
-    {
-        var method = typeof(VintageStoryContainerEventBridge).GetMethod("OnSlotModified", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("OnSlotModified was not found.");
-        method.Invoke(bridge, [inventory, slotId]);
-    }
+internal sealed class ContainerTestFixture : IDisposable
+{
+    private readonly Dictionary<string, Block> _blocks = new();
+    private readonly Dictionary<int, Item> _items = new();
+    private readonly string _containerType;
+    private readonly List<string> _errors = [];
+    internal BlockPos Position { get; } = new(5, 65, 5);
+    internal InventoryGeneric Inventory { get; }
+    internal TestContainer? Container { get; set; }
+    internal ICoreServerAPI Api { get; }
+    internal IServerWorldAccessor World { get; }
+    internal double GameHours { get; set; } = 100;
+    internal BlockMutationScopeManager Scopes { get; } = new();
+    internal CaptureSink Capture { get; } = new();
+    internal VintageStoryContainerEventBridge Bridge { get; }
 
-    private static InventoryGeneric CreateInventory(string inventoryId, string className, BlockPos position)
+    internal ContainerTestFixture(string containerType = "chest", bool inspecting = false,
+        IContainerTransactionCapture? capture = null)
     {
-        var api = ProxyFactory.Create<ICoreAPI>(proxy =>
+        _containerType = containerType;
+        var logger = ProxyFactory.Create<ILogger>(p => p.SetHandler("Error", args =>
         {
-            proxy.SetValue(nameof(ICoreAPI.World), CreateWorldAccessor(null, new AssetLocation("game", "air")));
-            proxy.SetValue(nameof(ICoreAPI.ClassRegistry), CreateClassRegistry());
+            _errors.Add(string.Join(" ", args ?? []));
+            return null;
+        }));
+        var accessor = ProxyFactory.Create<IBlockAccessor>(p =>
+        {
+            p.SetHandler("GetBlockEntity", _ => Container);
+            p.SetHandler("GetBlock", _ => Block("game:" + _containerType));
+            p.SetHandler("GetChunkAtBlockPos", _ => ProxyFactory.Create<IWorldChunk>(_ => { }));
         });
-        var inventory = new InventoryGeneric(4, inventoryId, className, api, static (_, inv) => new ItemSlot(inv))
+        World = ProxyFactory.Create<IServerWorldAccessor>(p =>
         {
-            Pos = position
+            p.SetValue(nameof(IWorldAccessor.BlockAccessor), accessor);
+            p.SetValue(nameof(IWorldAccessor.Logger), logger);
+            p.SetValue(nameof(IWorldAccessor.Side), EnumAppSide.Server);
+            p.SetValue(nameof(IWorldAccessor.Rand), new Random(1));
+            p.SetValue(nameof(IWorldAccessor.Calendar), ProxyFactory.Create<IGameCalendar>(calendar =>
+                calendar.SetHandler("get_TotalHours", _ => GameHours)));
+            p.SetHandler("GetBlock", args => args![0] is int id
+                ? _blocks.Values.SingleOrDefault(block => block.Id == id)
+                : _blocks.GetValueOrDefault(args[0]!.ToString()!));
+            p.SetHandler("GetItem", args => args![0] is int id
+                ? _items.GetValueOrDefault(id)
+                : _items.Values.SingleOrDefault(item => item.Code.ToString() == args[0]!.ToString()));
+        });
+        Api = ProxyFactory.Create<ICoreServerAPI>(p =>
+        {
+            p.SetValue(nameof(ICoreAPI.World), World);
+            p.SetValue(nameof(ICoreAPI.Logger), logger);
+            p.SetValue(nameof(ICoreServerAPI.Event), ProxyFactory.Create<IServerEventAPI>(_ => { }));
+            p.SetValue(nameof(ICoreAPI.ClassRegistry), ProxyFactory.Create<IClassRegistryAPI>(registry =>
+                registry.SetHandler("CreateInvNetworkUtil", _ => ProxyFactory.Create<IInventoryNetworkUtil>(_ => { }))));
+        });
+        Inventory = NewInventory();
+        Container = new TestContainer(Inventory, containerType);
+        Bridge = new VintageStoryContainerEventBridge(Api, capture ?? Capture, () => true,
+            () => "main", _ => inspecting, new VintageStoryInteractionAttributionTracker(), Scopes);
+    }
+
+    internal InventoryGeneric NewInventory()
+        => new(4, "inventory-1", _containerType, Api, static (_, inv) => new ItemSlot(inv))
+        {
+            Pos = Position.Copy(), AuditLogAccess = false
         };
-        return inventory;
+
+    internal ItemStack Stack(string code, int quantity) => new(Block(code), quantity);
+
+    internal void Register(Item item) => _items[item.Id] = item;
+
+    private Block Block(string code)
+    {
+        if (!_blocks.TryGetValue(code, out var block))
+            _blocks[code] = block = new Block { BlockId = _blocks.Count + 1, Code = new AssetLocation(code) };
+        return block;
     }
 
-    private static IClassRegistryAPI CreateClassRegistry()
+    internal void Change(int slotId, ItemStack? stack)
     {
-        return ProxyFactory.Create<IClassRegistryAPI>(proxy =>
-        {
-            proxy.SetHandler("CreateInvNetworkUtil", _ => ProxyFactory.Create<IInventoryNetworkUtil>(inner => { }));
-        });
+        Inventory[slotId].Itemstack = stack;
+        Inventory.DidModifyItemSlot(Inventory[slotId]);
     }
 
-    private static ICoreServerAPI CreateServerApi(BlockEntity container, AssetLocation blockCode)
-    {
-        var world = CreateWorldAccessor(container, blockCode);
-        var logger = ProxyFactory.Create<ILogger>(proxy => { });
-
-        return ProxyFactory.Create<ICoreServerAPI>(proxy =>
+    internal static IServerPlayer Player(string uid, string name)
+        => ProxyFactory.Create<IServerPlayer>(p =>
         {
-            proxy.SetValue(nameof(ICoreServerAPI.World), world);
-            proxy.SetValue(nameof(ICoreServerAPI.Logger), logger);
-        });
-    }
-
-    private static IServerWorldAccessor CreateWorldAccessor(BlockEntity? container, AssetLocation blockCode)
-    {
-        var block = new Block
-        {
-            Code = blockCode
-        };
-
-        var blockAccessor = ProxyFactory.Create<IBlockAccessor>(proxy =>
-        {
-            proxy.SetHandler("GetBlockEntity", _ => container!);
-            proxy.SetHandler("GetBlock", _ => block);
+            p.SetValue(nameof(IPlayer.PlayerUID), uid);
+            p.SetValue(nameof(IPlayer.PlayerName), name);
         });
 
-        return ProxyFactory.Create<IServerWorldAccessor>(proxy =>
-        {
-            proxy.SetValue(nameof(IWorldAccessor.BlockAccessor), blockAccessor);
-        });
+    public void Dispose()
+    {
+        Bridge.Unregister();
+        Assert.Empty(_errors);
     }
 
-    private static IServerPlayer CreateServerPlayer(string playerUid, string playerName)
+    internal sealed class CaptureSink : IContainerTransactionCapture
     {
-        return ProxyFactory.Create<IServerPlayer>(proxy =>
-        {
-            proxy.SetValue(nameof(IServerPlayer.PlayerUID), playerUid);
-            proxy.SetValue(nameof(IServerPlayer.PlayerName), playerName);
-        });
+        internal List<ContainerTransactionCaptureContext> Contexts { get; } = [];
+        public void Capture(ContainerTransactionCaptureContext context) => Contexts.Add(context);
     }
 
-    private static ItemStack CreateStack(string code, int quantity)
+    internal sealed class TestContainer(IInventory inventory, string className) : BlockEntity, IBlockEntityContainer
     {
-        var block = new Block
-        {
-            Code = new AssetLocation(code)
-        };
-        return new ItemStack(block, quantity);
-    }
-
-    private sealed class FakeContainerCapture : IContainerTransactionCapture
-    {
-        public List<ContainerTransactionCaptureContext> Contexts { get; } = [];
-
-        public void Capture(ContainerTransactionCaptureContext context)
-        {
-            Contexts.Add(context);
-        }
-
-        public ValueTask CaptureAsync(ContainerTransactionCaptureContext context, CancellationToken cancellationToken = default)
-        {
-            Contexts.Add(context);
-            return ValueTask.CompletedTask;
-        }
-    }
-
-    private sealed class TestBlockEntityContainer : BlockEntity, IBlockEntityContainer
-    {
-        public TestBlockEntityContainer(IInventory inventory, string inventoryClassName)
-        {
-            Inventory = inventory;
-            InventoryClassName = inventoryClassName;
-        }
-
-        public IInventory Inventory { get; }
-
-        public string InventoryClassName { get; }
-
-        public void DropContents(Vec3d atPos)
-        {
-        }
-
-        public void CheckInventoryClearedMidTick()
-        {
-        }
+        public IInventory Inventory => inventory;
+        public string InventoryClassName => className;
+        public void DropContents(Vec3d atPos) { }
+        public void CheckInventoryClearedMidTick() { }
     }
 }

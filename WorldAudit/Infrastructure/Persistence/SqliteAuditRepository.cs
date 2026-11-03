@@ -97,4 +97,7 @@ public sealed class SqliteAuditRepository : IAuditRepository
 
     public Task RecordRollbackBatchAsync(long jobId, IReadOnlyList<RollbackBatchEntryUpdate> updates, CancellationToken cancellationToken = default)
         => _rollbackStore.RecordRollbackBatchAsync(jobId, updates, cancellationToken);
+
+    public Task RecoverInterruptedJobsAsync(CancellationToken cancellationToken = default)
+        => _rollbackStore.RecoverInterruptedJobsAsync(cancellationToken);
 }

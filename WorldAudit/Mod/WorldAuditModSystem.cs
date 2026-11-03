@@ -160,7 +160,8 @@ public sealed class WorldAuditModSystem : ModSystem
 
     private string GetWorldId()
     {
-        return _api?.World.WorldName ?? "main";
+        return _api?.WorldManager.SaveGame.SavegameIdentifier
+            ?? throw new InvalidOperationException("The savegame identifier is not available.");
     }
 
     private static void RegisterPrivileges(ICoreServerAPI api)

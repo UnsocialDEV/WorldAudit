@@ -8,6 +8,7 @@ internal sealed class SqliteAuditRollbackStore
     private readonly SqliteAuditRepositoryState _state;
     private readonly SqliteAuditLookupResolver _resolver;
     private readonly SqliteAuditRecordReader _reader;
+    private readonly SqliteAuditWriteStore _writer;
 
     public SqliteAuditRollbackStore(
         SqliteAuditRepositoryState state,
@@ -17,6 +18,7 @@ internal sealed class SqliteAuditRollbackStore
         _state = state;
         _resolver = resolver;
         _reader = reader;
+        _writer = new SqliteAuditWriteStore(state, resolver);
     }
 
     public async Task<RollbackJob> CreateRollbackJobAsync(
@@ -71,18 +73,20 @@ internal sealed class SqliteAuditRollbackStore
             entryCommand.CommandText =
                 """
                 INSERT INTO rollback_job_entries (
-                    job_id, target_type_code, target_event_id, execution_order, result_code, applied_at_ms, error_text)
+                    job_id, target_type_code, target_event_id, execution_order, result_code, applied_at_ms, error_text, reverse_source)
                 VALUES (
-                    $jobId, $targetTypeCode, $targetEventId, $executionOrder, 'planned', NULL, NULL);
+                    $jobId, $targetTypeCode, $targetEventId, $executionOrder, 'planned', NULL, NULL, $reverseSource);
                 """;
             entryCommand.Parameters.AddWithValue("$jobId", jobId);
             entryCommand.Parameters.AddWithValue("$targetTypeCode", SqliteAuditValueCodec.ToCode(entry.TargetType));
             entryCommand.Parameters.AddWithValue("$targetEventId", entry.SourceRecordId);
             entryCommand.Parameters.AddWithValue("$executionOrder", entry.ExecutionOrder);
+            entryCommand.Parameters.AddWithValue("$reverseSource", entry.ReverseSource ? 1 : 0);
             await entryCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _resolver.PublishCommittedLookups(transaction);
         return (await GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false))!;
     }
 
@@ -97,11 +101,27 @@ internal sealed class SqliteAuditRollbackStore
         return jobs.Count == 0 ? null : jobs[0];
     }
 
+    public async Task RecoverInterruptedJobsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            UPDATE rollback_jobs SET state_code = 'paused',
+                last_error = 'Server stopped before this job finished. Use /wa apply to resume remaining entries or /wa cancel to discard them.'
+            WHERE state_code IN ('queued', 'running')
+              AND ($worldCode IS NULL OR world_id IN (SELECT id FROM worlds WHERE code = $worldCode));
+            """;
+        command.Parameters.AddWithValue("$worldCode", (object?)_state.Options.WorldId ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<RollbackJob>> GetRollbackJobsAsync(int limit, CancellationToken cancellationToken)
     {
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = $"{SqliteAuditSql.BaseRollbackJobSelectSql}ORDER BY rj.id DESC LIMIT $limit;";
+        command.CommandText = $"{SqliteAuditSql.BaseRollbackJobSelectSql}WHERE ($worldCode IS NULL OR w.code = $worldCode) ORDER BY rj.id DESC LIMIT $limit;";
+        command.Parameters.AddWithValue("$worldCode", (object?)_state.Options.WorldId ?? DBNull.Value);
         command.Parameters.AddWithValue("$limit", limit);
         return await _reader.ReadRollbackJobsAsync(command, cancellationToken).ConfigureAwait(false);
     }
@@ -113,13 +133,15 @@ internal sealed class SqliteAuditRollbackStore
     {
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText =
+        // Undo uses the actual mutations, including a failed apply whose compensation failed.
+        command.CommandText = appliedOnly
+            ? $"{SqliteAuditSql.BaseBlockSelectSql} WHERE be.source_job_id = $jobId ORDER BY be.id;"
+            :
             $"""
             {SqliteAuditSql.BaseBlockSelectSql}
             INNER JOIN rollback_job_entries rje ON rje.target_event_id = be.id
             WHERE rje.job_id = $jobId
               AND rje.target_type_code = 'block'
-              {(appliedOnly ? "AND rje.result_code = 'applied'" : string.Empty)}
             ORDER BY rje.execution_order;
             """;
         command.Parameters.AddWithValue("$jobId", jobId);
@@ -133,13 +155,14 @@ internal sealed class SqliteAuditRollbackStore
     {
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText =
+        command.CommandText = appliedOnly
+            ? $"{SqliteAuditSql.BaseContainerSelectSql} WHERE ct.source_job_id = $jobId ORDER BY ct.id;"
+            :
             $"""
             {SqliteAuditSql.BaseContainerSelectSql}
             INNER JOIN rollback_job_entries rje ON rje.target_event_id = ct.id
             WHERE rje.job_id = $jobId
               AND rje.target_type_code = 'container'
-              {(appliedOnly ? "AND rje.result_code = 'applied'" : string.Empty)}
             ORDER BY rje.execution_order;
             """;
         command.Parameters.AddWithValue("$jobId", jobId);
@@ -190,6 +213,7 @@ internal sealed class SqliteAuditRollbackStore
                 rje.id AS job_entry_id,
                 rje.job_id,
                 rje.execution_order,
+                rje.reverse_source,
                 rj.operation_code,
                 be.id AS source_event_id,
                 w.code AS world_code,
@@ -203,7 +227,8 @@ internal sealed class SqliteAuditRollbackStore
                 oldb.code AS old_block_code,
                 newb.code AS new_block_code,
                 be.old_block_entity_blob,
-                be.new_block_entity_blob
+                be.new_block_entity_blob,
+                be.layer
             FROM rollback_job_entries rje
             INNER JOIN rollback_jobs rj ON rj.id = rje.job_id
             INNER JOIN block_events be ON be.id = rje.target_event_id
@@ -222,6 +247,7 @@ internal sealed class SqliteAuditRollbackStore
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var operation = SqliteAuditValueCodec.ParseRollbackJobOperation(reader.GetString(reader.GetOrdinal("operation_code")));
+            var reverse = operation == RollbackJobOperation.Rollback || reader.GetInt32(reader.GetOrdinal("reverse_source")) != 0;
             results.Add(new RollbackBlockPlanEntry(
                 JobEntryId: reader.GetInt64(reader.GetOrdinal("job_entry_id")),
                 JobId: reader.GetInt64(reader.GetOrdinal("job_id")),
@@ -237,13 +263,17 @@ internal sealed class SqliteAuditRollbackStore
                     reader.GetInt32(reader.GetOrdinal("chunk_y")),
                     reader.GetInt32(reader.GetOrdinal("chunk_z"))),
                 SourceOccurredAt: DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(reader.GetOrdinal("occurred_at_ms"))),
-                TargetBlockCode: operation == RollbackJobOperation.Rollback
+                TargetBlockCode: reverse
                     ? (reader.IsDBNull(reader.GetOrdinal("old_block_code")) ? null : reader.GetString(reader.GetOrdinal("old_block_code")))
                     : (reader.IsDBNull(reader.GetOrdinal("new_block_code")) ? null : reader.GetString(reader.GetOrdinal("new_block_code"))),
-                TargetBlockEntitySnapshot: operation == RollbackJobOperation.Rollback
+                TargetBlockEntitySnapshot: reverse
                     ? SqliteAuditValueCodec.ReadBlob(reader, "old_block_entity_blob")
                     : SqliteAuditValueCodec.ReadBlob(reader, "new_block_entity_blob"),
-                ExecutionOrder: reader.GetInt32(reader.GetOrdinal("execution_order"))));
+                ExecutionOrder: reader.GetInt32(reader.GetOrdinal("execution_order")),
+                ExpectedBlockCode: reader.IsDBNull(reader.GetOrdinal(reverse ? "new_block_code" : "old_block_code"))
+                    ? null : reader.GetString(reader.GetOrdinal(reverse ? "new_block_code" : "old_block_code")),
+                ExpectedBlockEntitySnapshot: SqliteAuditValueCodec.ReadBlob(reader, reverse ? "new_block_entity_blob" : "old_block_entity_blob"),
+                Layer: reader.GetInt32(reader.GetOrdinal("layer"))));
         }
 
         return results;
@@ -367,13 +397,26 @@ internal sealed class SqliteAuditRollbackStore
                     result_code = $resultCode,
                     applied_at_ms = $appliedAt,
                     error_text = $errorText
-                WHERE id = $jobEntryId;
+                WHERE id = $jobEntryId AND job_id = $jobId AND result_code = 'planned';
                 """;
             entryCommand.Parameters.AddWithValue("$resultCode", SqliteAuditValueCodec.ToCode(update.Result));
             entryCommand.Parameters.AddWithValue("$appliedAt", processedAt);
             entryCommand.Parameters.AddWithValue("$errorText", string.IsNullOrWhiteSpace(update.ErrorText) ? DBNull.Value : update.ErrorText);
             entryCommand.Parameters.AddWithValue("$jobEntryId", update.JobEntryId);
-            await entryCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            entryCommand.Parameters.AddWithValue("$jobId", jobId);
+            if (await entryCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
+            {
+                continue;
+            }
+
+            if (update.BlockMutation is not null)
+            {
+                await _writer.WriteBlockEventsAsync(connection, transaction, [update.BlockMutation], cancellationToken).ConfigureAwait(false);
+            }
+            if (update.ContainerMutation is not null)
+            {
+                await _writer.WriteContainerTransactionsAsync(connection, transaction, [update.ContainerMutation], cancellationToken).ConfigureAwait(false);
+            }
 
             switch (update.Result)
             {
@@ -441,6 +484,7 @@ internal sealed class SqliteAuditRollbackStore
         await jobCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _resolver.PublishCommittedLookups(transaction);
     }
 
     private async Task<IReadOnlyList<RollbackContainerPlanEntry>> GetRollbackContainerPlanEntriesAsync(long jobId, CancellationToken cancellationToken)
@@ -453,6 +497,7 @@ internal sealed class SqliteAuditRollbackStore
                 rje.id AS job_entry_id,
                 rje.job_id,
                 rje.execution_order,
+                rje.reverse_source,
                 rj.operation_code,
                 ct.id AS source_transaction_id,
                 w.code AS world_code,
@@ -484,6 +529,7 @@ internal sealed class SqliteAuditRollbackStore
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var operation = SqliteAuditValueCodec.ParseRollbackJobOperation(reader.GetString(reader.GetOrdinal("operation_code")));
+            var reverse = operation == RollbackJobOperation.Rollback || reader.GetInt32(reader.GetOrdinal("reverse_source")) != 0;
             results.Add(new RollbackContainerPlanEntry(
                 JobEntryId: reader.GetInt64(reader.GetOrdinal("job_entry_id")),
                 JobId: reader.GetInt64(reader.GetOrdinal("job_id")),
@@ -501,10 +547,10 @@ internal sealed class SqliteAuditRollbackStore
                 SourceOccurredAt: DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(reader.GetOrdinal("occurred_at_ms"))),
                 InventoryType: reader.GetString(reader.GetOrdinal("inventory_type_code")),
                 ContainerLabel: reader.IsDBNull(reader.GetOrdinal("container_label")) ? null : reader.GetString(reader.GetOrdinal("container_label")),
-                ExpectedSnapshot: operation == RollbackJobOperation.Rollback
+                ExpectedSnapshot: reverse
                     ? SqliteAuditValueCodec.ReadBlob(reader, "after_snapshot_blob")
                     : SqliteAuditValueCodec.ReadBlob(reader, "before_snapshot_blob"),
-                TargetSnapshot: operation == RollbackJobOperation.Rollback
+                TargetSnapshot: reverse
                     ? SqliteAuditValueCodec.ReadBlob(reader, "before_snapshot_blob")
                     : SqliteAuditValueCodec.ReadBlob(reader, "after_snapshot_blob"),
                 ExecutionOrder: reader.GetInt32(reader.GetOrdinal("execution_order"))));

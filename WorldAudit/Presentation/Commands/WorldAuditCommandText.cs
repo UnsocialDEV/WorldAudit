@@ -18,7 +18,7 @@ internal static class WorldAuditCommandText
         [WA] /wa rollback [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
         [WA] /wa restore [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
         [WA] /wa undo <jobId>
-        [WA] /wa apply <jobId> | /wa jobs | /wa job <jobId>
+        [WA] /wa apply <jobId> (apply/resume) | /wa cancel <jobId> | /wa jobs | /wa job <jobId>
         [WA] /wa status | /wa reload | /wa consumer <pause|resume>
         [WA] /wa purge t:<age> | /wa purge confirm t:<age>
         """;
@@ -31,7 +31,7 @@ internal static class WorldAuditCommandText
             return new BlockPosition(0, 0, 0);
         }
 
-        return new BlockPosition(pos.X, pos.Y, pos.Z);
+        return new BlockPosition(pos.X, pos.InternalY, pos.Z);
     }
 
     public static string FormatDisplayPosition(ICoreServerAPI api, BlockPos position)
@@ -142,7 +142,7 @@ internal static class WorldAuditCommandText
             $"[WA] Blocks: {job.PlannedBlockCount} | Containers: {job.PlannedContainerCount} | Chunks: {job.PlannedChunkCount} | Oldest edit: {FormatRelativeTime(job.OldestTargetOccurredAt, DateTimeOffset.UtcNow)}",
             EnumChatType.CommandSuccess,
             null);
-        player.SendMessage(0, $"[WA] Use /wa job {job.Id} to inspect or /wa apply {job.Id} to apply.", EnumChatType.CommandSuccess, null);
+        player.SendMessage(0, $"[WA] Use /wa job {job.Id} to inspect, /wa apply {job.Id} to apply, or /wa cancel {job.Id} to discard.", EnumChatType.CommandSuccess, null);
     }
 
     public static IEnumerable<string> FormatStatus(AuditStatusSnapshot status)

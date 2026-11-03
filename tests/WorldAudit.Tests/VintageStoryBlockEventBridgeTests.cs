@@ -204,7 +204,7 @@ public sealed class VintageStoryBlockEventBridgeTests
     {
         var world = CreateWorldAccessor();
         var bridge = new VintageStoryBlockEventBridge(
-            api: null!,
+            api: CreateServerApi(),
             capture: new NoOpBlockMutationSink(),
             scopeManager: new BlockMutationScopeManager(),
             inspectHandler: (_, _) => Task.CompletedTask,

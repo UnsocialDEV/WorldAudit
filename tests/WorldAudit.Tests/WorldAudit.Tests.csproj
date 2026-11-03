@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>VintageStoryDirectory</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))</_Parameter2>
+    </AssemblyAttribute>
     <Using Include="Xunit" />
   </ItemGroup>
 
@@ -28,6 +32,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="0Harmony" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Lib/0Harmony.dll" Private="true" />
+    <Reference Include="VintagestoryLib" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/VintagestoryLib.dll" Private="true" />
+    <Reference Include="VSSurvivalMod" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Mods/VSSurvivalMod.dll" Private="true" />
+    <Reference Include="Newtonsoft.Json" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Lib/Newtonsoft.Json.dll" Private="true" />
+    <Reference Include="protobuf-net" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Lib/protobuf-net.dll" Private="true" />
     <Reference Include="VintagestoryAPI">
       <HintPath>$(VintageStoryApiPath)</HintPath>
       <Private>true</Private>

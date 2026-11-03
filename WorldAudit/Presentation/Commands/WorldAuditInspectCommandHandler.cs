@@ -30,7 +30,7 @@ internal sealed class WorldAuditInspectCommandHandler
             "inspect history",
             async () =>
             {
-                var blockPosition = new BlockPosition(pos.X, pos.Y, pos.Z);
+                var blockPosition = new BlockPosition(pos.X, pos.InternalY, pos.Z);
                 var worldId = _context.GetWorldId();
                 await TryFlushRecentAuditAsync().ConfigureAwait(false);
                 var blockResults = await _context.Runtime.BlockQueries

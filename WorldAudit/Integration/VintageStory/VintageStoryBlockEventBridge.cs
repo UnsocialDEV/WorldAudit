@@ -21,6 +21,8 @@ public sealed class VintageStoryBlockEventBridge
     private readonly VintageStoryBlockEntitySnapshotCodec _snapshotCodec;
     private readonly VintageStoryBlockMutationObserver _mutationObserver;
     private readonly VintageStoryInspectRequestDispatcher _inspectDispatcher;
+    private readonly VintageStoryGameHooks _gameHooks;
+    private bool _registered;
 
     public VintageStoryBlockEventBridge(
         ICoreServerAPI api,
@@ -43,6 +45,8 @@ public sealed class VintageStoryBlockEventBridge
         _isInspectEnabled = isInspectEnabled;
         _interactionTracker = interactionTracker;
         _snapshotCodec = snapshotCodec;
+        _gameHooks = new VintageStoryGameHooks(api, new VintageStoryMutationMonitor(api.World, capture, scopeManager,
+            worldIdAccessor, blockAuditEnabled, exception => api.Logger.Error("[WorldAudit] Block snapshot failed: {0}", exception)));
         _inspectDispatcher = new VintageStoryInspectRequestDispatcher(
             inspectHandler,
             (operation, exception) => _api?.Logger?.Error("[WorldAudit] {0} failed: {1}", operation, exception));
@@ -59,6 +63,9 @@ public sealed class VintageStoryBlockEventBridge
 
     public void Register()
     {
+        if (_registered) return;
+        _gameHooks.Register();
+        _registered = true;
         WorldAuditBlockMutationBehaviorRuntime.Initialize(this);
         _api.Event.CanPlaceOrBreakBlock += OnCanPlaceOrBreakBlock;
         _api.Event.BreakBlock += OnBreakBlock;
@@ -68,6 +75,9 @@ public sealed class VintageStoryBlockEventBridge
 
     public void Unregister()
     {
+        if (!_registered) return;
+        _registered = false;
+        _gameHooks.Dispose();
         WorldAuditBlockMutationBehaviorRuntime.Reset();
         _api.Event.CanPlaceOrBreakBlock -= OnCanPlaceOrBreakBlock;
         _api.Event.BreakBlock -= OnBreakBlock;
@@ -82,11 +92,13 @@ public sealed class VintageStoryBlockEventBridge
 
     internal void OnObservedBlockPlaced(Block block, IWorldAccessor world, BlockPos pos)
     {
+        if (VintageStoryGameHooks.Active) return;
         _mutationObserver.OnBlockPlaced(block, world, pos);
     }
 
     internal void OnObservedBlockRemoved(Block block, IWorldAccessor world, BlockPos pos)
     {
+        if (VintageStoryGameHooks.Active) return;
         _mutationObserver.OnBlockRemoved(block, world, pos);
     }
 
@@ -219,7 +231,7 @@ public sealed class VintageStoryBlockEventBridge
 
     private void SeedPlayerScope(string actorName, string? actorExternalId, BlockPos position, byte[]? oldBlockEntitySnapshot)
     {
-        var worldPosition = new BlockPosition(position.X, position.Y, position.Z);
+        var worldPosition = new BlockPosition(position.X, position.InternalY, position.Z);
         _scopeManager.SeedPositionScope(
             _worldIdAccessor(),
             worldPosition,

@@ -354,6 +354,21 @@ public sealed class SqliteSchemaMigrator
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (!await MigrationExistsAsync(connection, transaction, 8, cancellationToken).ConfigureAwait(false))
+        {
+            await ExecuteAsync(connection, transaction,
+                """
+                ALTER TABLE block_events ADD COLUMN layer INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE rollback_job_entries ADD COLUMN reverse_source INTEGER NOT NULL DEFAULT 0;
+                UPDATE rollback_jobs SET state_code = 'cancelled',
+                    last_error = 'Cancelled during safety upgrade: legacy plans lack verified save/layer ownership. Create a new preview after verifying historical ownership.'
+                WHERE state_code IN ('previewed', 'queued', 'running', 'paused');
+                """, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, transaction,
+                $"INSERT INTO schema_migrations(version, applied_at_ms) VALUES (8, {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()});",
+                cancellationToken).ConfigureAwait(false);
+        }
+
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 

@@ -58,6 +58,8 @@ public sealed class RollbackPlanner
     {
         var sourceJob = await _repository.GetRollbackJobAsync(sourceJobId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Job #{sourceJobId} was not found.");
+        if (!string.IsNullOrWhiteSpace(_options.WorldId) && !string.Equals(_options.WorldId, sourceJob.WorldId, StringComparison.Ordinal))
+            throw new InvalidOperationException("This job belongs to another world.");
 
         if (sourceJob.State is not (RollbackJobState.Completed or RollbackJobState.CompletedWithConflicts))
         {
@@ -81,7 +83,8 @@ public sealed class RollbackPlanner
             inverseOperation,
             sourceEvents,
             sourceTransactions,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            reverseSource: true).ConfigureAwait(false);
     }
 
     private async Task<RollbackJob> PreviewAsync(
@@ -144,9 +147,10 @@ public sealed class RollbackPlanner
         RollbackJobOperation operation,
         IReadOnlyList<BlockAuditEvent> selectedEvents,
         IReadOnlyList<ContainerAuditTransaction> selectedTransactions,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool reverseSource = false)
     {
-        var orderedEntries = Order(selectedEvents, selectedTransactions, operation);
+        var orderedEntries = Order(selectedEvents, selectedTransactions, reverseSource ? RollbackJobOperation.Rollback : operation);
         var plannedBlockCount = 0;
         var plannedContainerCount = 0;
         var chunkSet = new HashSet<ChunkPosition>();
@@ -156,7 +160,7 @@ public sealed class RollbackPlanner
         for (var index = 0; index < orderedEntries.Length; index++)
         {
             var entry = orderedEntries[index];
-            persistedEntries[index] = new RollbackJobPlanEntryCreate(entry.TargetType, entry.SourceRecordId, index);
+            persistedEntries[index] = new RollbackJobPlanEntryCreate(entry.TargetType, entry.SourceRecordId, index, reverseSource);
 
             if (entry.TargetType == RollbackJobEntryTargetType.Block)
             {

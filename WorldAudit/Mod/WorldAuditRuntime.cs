@@ -118,6 +118,7 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
 
         var diagnostics = new AuditPerformanceDiagnostics(options, diagnosticsLogger);
         var repository = new SqliteAuditRepository(connectionFactory, options, diagnostics);
+        await repository.RecoverInterruptedJobsAsync(cancellationToken).ConfigureAwait(false);
         var maintenanceRepository = new SqliteAuditMaintenanceRepository(connectionFactory);
         var maintenanceService = new AuditMaintenanceService(maintenanceRepository);
         var auditWriter = new ChannelAuditWriter(repository, options, diagnostics);
@@ -127,7 +128,7 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
         var blockMutationCapture = new BlockMutationCaptureService(auditWriter, mutationGuard, blockMutationClassifier);
         var blockCapture = new BlockChangeCaptureService(auditWriter, mutationGuard);
         var blockQueries = new BlockAuditQueryService(repository, options);
-        var containerCapture = new ContainerTransactionCaptureService(auditWriter);
+        var containerCapture = new ContainerTransactionCaptureService(auditWriter, mutationGuard);
         var containerQueries = new ContainerAuditQueryService(repository, options);
         var rollbackPlanner = new RollbackPlanner(repository, options);
         var rollbackCoordinator = new RollbackExecutionCoordinator(
@@ -342,9 +343,10 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
         return RollbackCoordinator.ProcessTickAsync(cancellationToken);
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return _auditWriter.DisposeAsync();
+        try { await RollbackCoordinator.SuspendAsync().ConfigureAwait(false); }
+        finally { await _auditWriter.DisposeAsync().ConfigureAwait(false); }
     }
 
     private async Task EnsureNoBlockingRollbackJobsAsync(CancellationToken cancellationToken)

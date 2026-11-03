@@ -30,7 +30,7 @@ public sealed class VintageStoryInteractionAttributionTracker
             return;
         }
 
-        var key = new InteractionKey(worldId, position.X, position.Y, position.Z);
+        var key = new InteractionKey(worldId, position.X, position.InternalY, position.Z);
         var queue = _entries.GetOrAdd(key, static _ => new ConcurrentQueue<InteractionEntry>());
         var entry = new InteractionEntry(actorName, actorExternalId, oldBlockEntitySnapshot, _clock());
         queue.Enqueue(entry);
@@ -46,7 +46,7 @@ public sealed class VintageStoryInteractionAttributionTracker
         }
 
         var now = _clock();
-        var key = new InteractionKey(worldId, position.X, position.Y, position.Z);
+        var key = new InteractionKey(worldId, position.X, position.InternalY, position.Z);
         if (!_entries.TryGetValue(key, out var queue))
         {
             return false;

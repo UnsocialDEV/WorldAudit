@@ -53,7 +53,7 @@ public sealed class BlockMutationCaptureServiceTests
     }
 
     [Fact]
-    public async Task Observe_FireContext_UsesFireCause()
+    public async Task Observe_FireNeighborAlone_RemainsUnknown()
     {
         var writer = new FakeAuditWriter();
         var service = CreateService(writer);
@@ -68,12 +68,12 @@ public sealed class BlockMutationCaptureServiceTests
             HasFireNeighbor: true));
 
         var auditEvent = Assert.Single(writer.BlockEvents);
-        Assert.Equal(AuditCause.Fire, auditEvent.Cause);
-        Assert.Equal("#fire", auditEvent.Actor.Name);
+        Assert.Equal(AuditCause.Unknown, auditEvent.Cause);
+        Assert.Equal("#unknown", auditEvent.Actor.Name);
     }
 
     [Fact]
-    public async Task Observe_GravityTokens_ClassifyBreakAndReplaceEvents()
+    public async Task Observe_GravityMaterialAlone_RemainsUnknown()
     {
         var writer = new FakeAuditWriter();
         var service = CreateService(writer);
@@ -97,13 +97,13 @@ public sealed class BlockMutationCaptureServiceTests
         Assert.Equal(2, writer.BlockEvents.Count);
         Assert.All(writer.BlockEvents, auditEvent =>
         {
-            Assert.Equal(AuditCause.Gravity, auditEvent.Cause);
-            Assert.Equal("#gravity", auditEvent.Actor.Name);
+            Assert.Equal(AuditCause.Unknown, auditEvent.Cause);
+            Assert.Equal("#unknown", auditEvent.Actor.Name);
         });
     }
 
     [Fact]
-    public async Task Observe_DecayTokens_UseDecayCause()
+    public async Task Observe_DecayedMaterialAlone_RemainsUnknown()
     {
         var writer = new FakeAuditWriter();
         var service = CreateService(writer);
@@ -117,8 +117,8 @@ public sealed class BlockMutationCaptureServiceTests
             NewBlockCode: "game:air"));
 
         var auditEvent = Assert.Single(writer.BlockEvents);
-        Assert.Equal(AuditCause.Decay, auditEvent.Cause);
-        Assert.Equal("#decay", auditEvent.Actor.Name);
+        Assert.Equal(AuditCause.Unknown, auditEvent.Cause);
+        Assert.Equal("#unknown", auditEvent.Actor.Name);
     }
 
     [Fact]

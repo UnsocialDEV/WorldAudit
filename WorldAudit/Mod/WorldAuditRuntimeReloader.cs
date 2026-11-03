@@ -29,6 +29,8 @@ internal sealed class WorldAuditRuntimeReloader
         WorldAuditRuntimeReloadState currentState,
         WorldAuditModConfig newConfig)
     {
+        if (currentState.Runtime.RollbackCoordinator.GetActiveJobCount() > 0)
+            return (false, "[WA] Wait for active rollback jobs to finish before reloading.", currentState);
         try
         {
             currentState.EventBridge.FlushPendingMutations();
@@ -44,6 +46,7 @@ internal sealed class WorldAuditRuntimeReloader
         VintageStoryBlockEventBridge? newEventBridge = null;
         VintageStoryContainerEventBridge? newContainerBridge = null;
         var previousStateDetached = false;
+        var trackedInventories = currentState.ContainerEventBridge.TrackedInventories;
 
         try
         {
@@ -68,6 +71,7 @@ internal sealed class WorldAuditRuntimeReloader
 
             newEventBridge.Register();
             newContainerBridge.Register();
+            foreach (var inventory in trackedInventories) newContainerBridge.TrackInventory(inventory);
             var newTickListenerId = _tickListenerRegistrar(newConfig.RollbackTickIntervalMilliseconds);
             newRuntime.ProcessMaintenanceTickAsync(force: true).GetAwaiter().GetResult();
 
@@ -92,6 +96,7 @@ internal sealed class WorldAuditRuntimeReloader
                 {
                     currentState.EventBridge.Register();
                     currentState.ContainerEventBridge.Register();
+                    foreach (var inventory in trackedInventories) currentState.ContainerEventBridge.TrackInventory(inventory);
                     var restoredTickListenerId = _tickListenerRegistrar(currentState.Config.RollbackTickIntervalMilliseconds);
                     currentState = currentState with { RollbackTickListenerId = restoredTickListenerId };
                 }

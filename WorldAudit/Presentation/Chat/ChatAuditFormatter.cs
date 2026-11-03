@@ -16,7 +16,7 @@ public sealed class ChatAuditFormatter : IResultFormatter
         var lines = new List<string>(events.Count * 2);
         foreach (var auditEvent in events)
         {
-            lines.Add($"[WA] {FormatRelativeTime(auditEvent.OccurredAt, now)} {auditEvent.Actor.Name} {DescribeAction(auditEvent)} at {auditEvent.Position.X}, {auditEvent.Position.Y}, {auditEvent.Position.Z}");
+            lines.Add($"[WA] {FormatRelativeTime(auditEvent.OccurredAt, now)} {auditEvent.Actor.Name} {DescribeAction(auditEvent)} at {auditEvent.Position.X}, {auditEvent.Position.LocalY}, {auditEvent.Position.Z} (dimension {auditEvent.Position.Dimension})");
             lines.Add($"[WA]      cause: {auditEvent.Cause.ToString().ToLowerInvariant()} | world: {auditEvent.WorldId} | action: {auditEvent.Action.ToString().ToLowerInvariant()}");
         }
 
@@ -33,7 +33,7 @@ public sealed class ChatAuditFormatter : IResultFormatter
         var lines = new List<string>(transactions.Count * 2);
         foreach (var transaction in transactions)
         {
-            lines.Add($"[WA] {FormatRelativeTime(transaction.OccurredAt, now)} {transaction.Actor.Name} changed {FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType)} at {transaction.Position.X}, {transaction.Position.Y}, {transaction.Position.Z}");
+            lines.Add($"[WA] {FormatRelativeTime(transaction.OccurredAt, now)} {transaction.Actor.Name} changed {FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType)} at {transaction.Position.X}, {transaction.Position.LocalY}, {transaction.Position.Z} (dimension {transaction.Position.Dimension})");
             lines.Add($"[WA]      cause: {transaction.Cause.ToString().ToLowerInvariant()} | inventory: {transaction.InventoryType} | lines: {DescribeContainerLines(transaction.Lines)}");
         }
 

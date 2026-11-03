@@ -29,7 +29,8 @@ internal static class SqliteAuditSql
             be.new_block_entity_blob,
             be.flags,
             be.source_job_id,
-            be.source_event_id
+            be.source_event_id,
+            be.layer
         FROM block_events be
         INNER JOIN worlds w ON w.id = be.world_id
         INNER JOIN actors a ON a.id = be.actor_id

@@ -10,7 +10,8 @@ public sealed class SqliteAuditMaintenanceRepository : IAuditMaintenanceReposito
     [
         "completed",
         "completedwithconflicts",
-        "failed"
+        "failed",
+        "cancelled"
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;

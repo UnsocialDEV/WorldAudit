@@ -14,4 +14,5 @@ public sealed record BlockAuditEvent(
     byte[]? NewBlockEntitySnapshot = null,
     int Flags = 0,
     long? SourceJobId = null,
-    long? SourceEventId = null);
+    long? SourceEventId = null,
+    int Layer = 1);

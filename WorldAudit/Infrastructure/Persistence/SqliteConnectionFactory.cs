@@ -53,7 +53,7 @@ public sealed class SqliteConnectionFactory
 
     private static bool InitializeProvider()
     {
-        SqliteNativeLibraryBootstrapper.EnsureLoaded(AppContext.BaseDirectory);
+        SqliteNativeLibraryBootstrapper.EnsureLoaded(Path.GetDirectoryName(typeof(SqliteConnectionFactory).Assembly.Location) ?? AppContext.BaseDirectory);
         Batteries_V2.Init();
         return true;
     }

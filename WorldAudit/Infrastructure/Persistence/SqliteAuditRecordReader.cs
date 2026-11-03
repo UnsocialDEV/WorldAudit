@@ -32,7 +32,8 @@ internal sealed class SqliteAuditRecordReader
                 NewBlockEntitySnapshot: SqliteAuditValueCodec.ReadBlob(reader, "new_block_entity_blob"),
                 Flags: reader.GetInt32(reader.GetOrdinal("flags")),
                 SourceJobId: reader.IsDBNull(reader.GetOrdinal("source_job_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_job_id")),
-                SourceEventId: reader.IsDBNull(reader.GetOrdinal("source_event_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_event_id"))));
+                SourceEventId: reader.IsDBNull(reader.GetOrdinal("source_event_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_event_id")),
+                Layer: reader.GetInt32(reader.GetOrdinal("layer"))));
         }
 
         return results;

@@ -8,5 +8,7 @@ public enum RollbackJobState
     Running,
     Completed,
     CompletedWithConflicts,
-    Failed
+    Failed,
+    Paused,
+    Cancelled
 }

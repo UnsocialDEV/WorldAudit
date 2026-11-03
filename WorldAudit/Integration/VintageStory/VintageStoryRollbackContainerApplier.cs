@@ -19,6 +19,9 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
     public Task<RollbackContainerApplyResult> ApplyAsync(RollbackContainerPlanEntry entry, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var worldId = _api.WorldManager?.SaveGame?.SavegameIdentifier;
+        if (worldId is not null && !string.Equals(entry.WorldId, worldId, StringComparison.Ordinal))
+            return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Conflict, false, null, "Rollback entry belongs to another savegame."));
 
         var pos = new BlockPos(entry.Position.X, entry.Position.Y, entry.Position.Z);
         if (_api.World.BlockAccessor.GetChunkAtBlockPos(pos) is null)
@@ -50,32 +53,43 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
         }
 
         var previousSnapshot = SerializeInventorySnapshot(inventory);
-        if (entry.ExpectedSnapshot is not null && !SnapshotsEqual(previousSnapshot, entry.ExpectedSnapshot))
-        {
-            return Task.FromResult(new RollbackContainerApplyResult(
-                RollbackContainerApplyStatus.Conflict,
-                false,
-                previousSnapshot,
-                "Current container state no longer matches the expected rollback snapshot."));
-        }
+        if (entry.ExpectedSnapshot is null)
+            return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Conflict, false, previousSnapshot, "Expected container snapshot is missing."));
+        if (!TryPrepareSnapshot(inventory, entry.TargetSnapshot, out var preparedSnapshot, out var prepareStatus, out var prepareError)
+            || !TryPrepareSnapshot(inventory, entry.ExpectedSnapshot, out var expectedSnapshot, out prepareStatus, out prepareError))
+            return Task.FromResult(new RollbackContainerApplyResult(prepareStatus, false, previousSnapshot, prepareError));
 
-        if (!TryPrepareSnapshot(inventory, entry.TargetSnapshot, out var preparedSnapshot, out var prepareStatus, out var prepareError))
+        for (var slotId = 0; slotId < inventory.Count; slotId++)
         {
-            return Task.FromResult(new RollbackContainerApplyResult(
-                prepareStatus,
-                false,
-                previousSnapshot,
-                prepareError));
+            var expected = expectedSnapshot.Slots[slotId].ItemStack;
+            var target = preparedSnapshot.Slots[slotId].ItemStack;
+            var actual = inventory[slotId].Itemstack;
+            if (StacksEquivalent(expected, target))
+            {
+                // Unchanged slots belong to other transactions; retain their current contents.
+                preparedSnapshot.Slots[slotId] = new PreparedSlot(slotId, actual?.Clone());
+                continue;
+            }
+            if (!StacksEquivalent(actual, expected))
+                return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Conflict, false, previousSnapshot, $"Container slot {slotId} no longer matches the expected state."));
+            if (actual is not null && target is not null && StacksEquivalent(actual, target, ignoreQuantity: true))
+            {
+                var retained = actual.Clone();
+                retained.StackSize = target.StackSize;
+                preparedSnapshot.Slots[slotId] = new PreparedSlot(slotId, retained);
+            }
         }
 
         var applySucceeded = TryApplySnapshot(inventory, container, preparedSnapshot, out var applyError, out var mutationAttempted);
         if (applySucceeded)
         {
-            var changedWorld = !SnapshotsEqual(previousSnapshot, SerializeInventorySnapshot(inventory));
-            return Task.FromResult(new RollbackContainerApplyResult(
-                RollbackContainerApplyStatus.Applied,
-                changedWorld,
-                previousSnapshot));
+            try
+            {
+                var actualSnapshot = SerializeInventorySnapshot(inventory);
+                return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Applied,
+                    !SnapshotsEqual(previousSnapshot, actualSnapshot), previousSnapshot, ActualSnapshot: actualSnapshot));
+            }
+            catch (Exception exception) { applyError = $"Cannot verify restored inventory: {exception.Message}"; }
         }
 
         if (!mutationAttempted)
@@ -88,9 +102,17 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
         }
 
         string? revertApplyError = null;
-        var reverted = TryPrepareSnapshot(inventory, previousSnapshot, out var preparedPreviousSnapshot, out _, out var revertPrepareError)
-            && TryApplySnapshot(inventory, container, preparedPreviousSnapshot, out revertApplyError, out _)
-            && SnapshotsEqual(previousSnapshot, SerializeInventorySnapshot(inventory));
+        string? revertPrepareError = null;
+        byte[]? finalSnapshot = null;
+        var reverted = false;
+        try
+        {
+            reverted = TryPrepareSnapshot(inventory, previousSnapshot, out var preparedPreviousSnapshot, out _, out revertPrepareError)
+                && TryApplySnapshot(inventory, container, preparedPreviousSnapshot, out revertApplyError, out _);
+            finalSnapshot = SerializeInventorySnapshot(inventory);
+            reverted &= SnapshotsEqual(previousSnapshot, finalSnapshot);
+        }
+        catch (Exception exception) { revertApplyError = exception.Message; reverted = false; }
 
         if (!reverted)
         {
@@ -99,9 +121,9 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
             _api.Logger.Error("[WorldAudit] Failed to revert container rollback mutation at {0}: {1}", pos, error);
             return Task.FromResult(new RollbackContainerApplyResult(
                 RollbackContainerApplyStatus.Failed,
-                !SnapshotsEqual(previousSnapshot, SerializeInventorySnapshot(inventory)),
+                !SnapshotsEqual(previousSnapshot, finalSnapshot),
                 previousSnapshot,
-                error));
+                error, ActualSnapshot: finalSnapshot));
         }
 
         return Task.FromResult(new RollbackContainerApplyResult(
@@ -186,6 +208,7 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
             {
                 var preparedSlot = snapshot.Slots[slotId];
                 var itemSlot = inventory[preparedSlot.SlotId];
+                if (SnapshotsEqual(itemSlot.Itemstack?.ToBytes(), preparedSlot.ItemStack?.ToBytes())) continue;
                 mutationAttempted = true;
                 itemSlot.Itemstack = preparedSlot.ItemStack;
                 inventory.DidModifyItemSlot(itemSlot);
@@ -248,6 +271,7 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
         using var stream = new MemoryStream(snapshotBytes, writable: false);
         using var reader = new BinaryReader(stream);
         var count = reader.ReadInt32();
+        if (count < 0 || count > 65536) throw new InvalidDataException("Invalid inventory slot count.");
         var result = new List<SnapshotSlot>(count);
         for (var index = 0; index < count; index++)
         {
@@ -255,11 +279,28 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
             _ = reader.ReadString();
             _ = reader.ReadInt32();
             var stackLength = reader.ReadInt32();
+            if (stackLength < 0 || stackLength > stream.Length - stream.Position) throw new InvalidDataException("Invalid stack length.");
             var stackBytes = stackLength > 0 ? reader.ReadBytes(stackLength) : null;
             result.Add(new SnapshotSlot(slotId, stackBytes));
         }
 
+        if (stream.Position != stream.Length) throw new InvalidDataException("Trailing inventory snapshot data.");
         return result;
+    }
+
+    internal static bool StacksEquivalent(ItemStack? left, ItemStack? right, bool ignoreQuantity = false)
+    {
+        if (left is null || right is null) return left is null && right is null;
+        var a = left.Clone();
+        var b = right.Clone();
+        if (ignoreQuantity) a.StackSize = b.StackSize = 1;
+        foreach (var stack in new[] { a, b })
+        {
+            var transition = stack.Attributes.GetTreeAttribute("transitionstate");
+            transition?.RemoveAttribute("lastUpdatedTotalHours");
+            transition?.RemoveAttribute("transitionedHours");
+        }
+        return a.ToBytes().AsSpan().SequenceEqual(b.ToBytes());
     }
 
     private static bool SnapshotsEqual(byte[]? left, byte[]? right)

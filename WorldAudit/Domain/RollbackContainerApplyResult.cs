@@ -4,4 +4,5 @@ public sealed record RollbackContainerApplyResult(
     RollbackContainerApplyStatus Status,
     bool ChangedWorld,
     byte[]? PreviousSnapshot,
-    string? ErrorText = null);
+    string? ErrorText = null,
+    byte[]? ActualSnapshot = null);

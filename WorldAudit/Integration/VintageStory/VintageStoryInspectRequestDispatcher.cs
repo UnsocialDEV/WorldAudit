@@ -26,7 +26,7 @@ internal sealed class VintageStoryInspectRequestDispatcher
         ArgumentNullException.ThrowIfNull(player);
         ArgumentNullException.ThrowIfNull(position);
 
-        var key = new BlockPosition(position.X, position.Y, position.Z);
+        var key = new BlockPosition(position.X, position.InternalY, position.Z);
         var now = DateTimeOffset.UtcNow;
 
         lock (_sync)

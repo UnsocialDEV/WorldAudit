@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using WorldAudit.Domain;
 
 namespace WorldAudit.Infrastructure.Persistence;
@@ -6,6 +8,7 @@ namespace WorldAudit.Infrastructure.Persistence;
 internal sealed class SqliteAuditLookupResolver
 {
     private readonly SqliteAuditRepositoryState _state;
+    private static readonly ConditionalWeakTable<SqliteTransaction, Dictionary<string, PendingLookup>> PendingLookups = new();
 
     public SqliteAuditLookupResolver(SqliteAuditRepositoryState state)
     {
@@ -23,6 +26,8 @@ internal sealed class SqliteAuditLookupResolver
         {
             return cachedId;
         }
+        var pending = PendingLookups.GetValue(transaction, static _ => new(StringComparer.OrdinalIgnoreCase));
+        if (pending.TryGetValue($"actors:{actorName}", out var pendingActor)) return pendingActor.Id;
 
         await using var insert = connection.CreateCommand();
         insert.Transaction = transaction;
@@ -46,7 +51,7 @@ internal sealed class SqliteAuditLookupResolver
             ? actorId
             : throw new InvalidOperationException($"Failed to resolve actor '{actorName}'.");
 
-        _state.ActorIds.TryAdd(actorName, id);
+        pending[$"actors:{actorName}"] = new PendingLookup(_state.ActorIds, actorName, id);
         return id;
     }
 
@@ -167,6 +172,9 @@ internal sealed class SqliteAuditLookupResolver
         {
             return cachedId;
         }
+        var pending = PendingLookups.GetValue(transaction, static _ => new(StringComparer.OrdinalIgnoreCase));
+        var key = $"{tableName}:{code}";
+        if (pending.TryGetValue(key, out var pendingLookup)) return pendingLookup.Id;
 
         await using var insert = connection.CreateCommand();
         insert.Transaction = transaction;
@@ -184,9 +192,18 @@ internal sealed class SqliteAuditLookupResolver
             ? lookupId
             : throw new InvalidOperationException($"Failed to resolve lookup '{tableName}:{code}'.");
 
-        cache.TryAdd(code, id);
+        pending[key] = new PendingLookup(cache, code, id);
         return id;
     }
+
+    public void PublishCommittedLookups(SqliteTransaction transaction)
+    {
+        if (!PendingLookups.TryGetValue(transaction, out var pending)) return;
+        foreach (var lookup in pending.Values) lookup.Cache.TryAdd(lookup.Code, lookup.Id);
+        PendingLookups.Remove(transaction);
+    }
+
+    private sealed record PendingLookup(ConcurrentDictionary<string, long> Cache, string Code, long Id);
 
     private static Task<long?> ResolveOptionalCodeLookupAsync(
         SqliteConnection connection,

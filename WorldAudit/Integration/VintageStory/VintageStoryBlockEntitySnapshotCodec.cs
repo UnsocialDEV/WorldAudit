@@ -1,7 +1,7 @@
 using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
-using Vintagestory.API.Util;
+using HarmonyLib;
 
 namespace WorldAudit.Integration.VintageStory;
 
@@ -22,16 +22,9 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
             return null;
         }
 
-        try
-        {
-            var tree = new TreeAttribute();
-            blockEntity.ToTreeAttributes(tree);
-            return TryGetOrNull(() => SerializerUtil.Serialize(tree));
-        }
-        catch
-        {
-            return null;
-        }
+        var tree = new TreeAttribute();
+        blockEntity.ToTreeAttributes(tree);
+        return tree.ToBytes();
     }
 
     public bool TryRestore(BlockPos pos, byte[] snapshot, out string? error)
@@ -41,7 +34,8 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
         TreeAttribute tree;
         try
         {
-            tree = SerializerUtil.Deserialize<TreeAttribute>(snapshot);
+            tree = new TreeAttribute();
+            tree.FromBytes(snapshot);
         }
         catch (Exception exception)
         {
@@ -58,7 +52,17 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
 
         try
         {
+            // 1.22.7 reads these lists only when both keys exist, but omits empty lists when saving.
+            if (blockEntity.Behaviors.Any(b => b.GetType().FullName == "Vintagestory.GameContent.BEBehaviorMicroblockSnowCover"))
+                foreach (var key in new[] { "snowcuboids", "groundSnowCuboids" })
+                    if (!tree.HasAttribute(key)) tree[key] = new IntArrayAttribute(Array.Empty<int>());
             blockEntity.FromTreeAttributes(tree, _world);
+            // Door FromTreeAttributes refreshes hitboxes only on the client in 1.22.7.
+            foreach (var door in blockEntity.Behaviors.Where(b => b.GetType().FullName == "Vintagestory.GameContent.BEBehaviorDoor"))
+            {
+                AccessTools.Field(door.GetType(), "boxesClosed").SetValue(door, blockEntity.Block.CollisionBoxes);
+                AccessTools.Method(door.GetType(), "SetupRotationsAndColSelBoxes").Invoke(door, [false]);
+            }
             if (!TryValidateBlockEntity(blockEntity, out error))
             {
                 return false;
@@ -87,6 +91,20 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
         return TryValidateBlockEntity(blockEntity, out error);
     }
 
+    public bool AreEquivalent(byte[]? left, byte[]? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null) return false;
+        if (left.AsSpan().SequenceEqual(right)) return true;
+        try
+        {
+            var leftTree = new TreeAttribute(); leftTree.FromBytes(left);
+            var rightTree = new TreeAttribute(); rightTree.FromBytes(right);
+            return leftTree.Equals(_world, rightTree);
+        }
+        catch { return false; }
+    }
+
     private static bool TryValidateBlockEntity(BlockEntity blockEntity, out string? error)
     {
         error = null;
@@ -104,18 +122,4 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
         }
     }
 
-    internal static T? TryGetOrNull<T>(System.Func<T> operation)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(operation);
-
-        try
-        {
-            return operation();
-        }
-        catch
-        {
-            return null;
-        }
-    }
 }

@@ -56,7 +56,8 @@ internal sealed class WorldAuditRuntimeBinder
             () => _configAccessor()?.EnableContainerAudit ?? true,
             _worldIdAccessor,
             uid => _inspectorStateAccessor()?.IsEnabled(uid) ?? false,
-            _interactionTracker);
+            _interactionTracker,
+            runtime.BlockMutationScopes);
     }
 
     public long RegisterRollbackTickListener(long currentListenerId, int intervalMilliseconds, Action tickAction)

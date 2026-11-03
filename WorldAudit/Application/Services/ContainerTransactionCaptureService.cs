@@ -7,15 +7,18 @@ namespace WorldAudit.Application.Services;
 public sealed class ContainerTransactionCaptureService : IContainerTransactionCapture
 {
     private readonly IAuditWriter _auditWriter;
+    private readonly IWorldMutationGuard? _mutationGuard;
 
-    public ContainerTransactionCaptureService(IAuditWriter auditWriter)
+    public ContainerTransactionCaptureService(IAuditWriter auditWriter, IWorldMutationGuard? mutationGuard = null)
     {
         _auditWriter = auditWriter;
+        _mutationGuard = mutationGuard;
     }
 
     public void Capture(ContainerTransactionCaptureContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        if (_mutationGuard?.IsActive(context.WorldId, context.Position) == true) return;
 
         var lines = new ContainerAuditLine[context.Lines.Count];
         for (var index = 0; index < context.Lines.Count; index++)
@@ -37,7 +40,7 @@ public sealed class ContainerTransactionCaptureService : IContainerTransactionCa
             WorldId: context.WorldId,
             Position: context.Position,
             OccurredAt: context.OccurredAt,
-            Actor: new AuditActor(context.ActorName, context.ActorExternalId, context.Cause != AuditCause.Player),
+            Actor: new AuditActor(context.ActorName, context.ActorExternalId, context.Cause != AuditCause.Player && string.IsNullOrWhiteSpace(context.ActorExternalId)),
             Cause: context.Cause,
             InventoryType: context.InventoryType,
             ContainerLabel: context.ContainerLabel,

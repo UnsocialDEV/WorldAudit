@@ -24,6 +24,14 @@ internal sealed class SqliteAuditWriteStore
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
+        await WriteBlockEventsAsync(connection, transaction, events, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _resolver.PublishCommittedLookups(transaction);
+    }
+
+    internal async Task WriteBlockEventsAsync(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyList<BlockAuditEvent> events, CancellationToken cancellationToken)
+    {
+
         foreach (var auditEvent in events)
         {
             var worldId = await _resolver.ResolveWorldIdAsync(connection, transaction, auditEvent.WorldId, cancellationToken).ConfigureAwait(false);
@@ -40,10 +48,10 @@ internal sealed class SqliteAuditWriteStore
                 """
                 INSERT INTO block_events (
                     world_id, x, y, z, chunk_x, chunk_y, chunk_z, occurred_at_ms, actor_id, cause_id, action_id,
-                    old_block_id, new_block_id, old_block_entity_blob, new_block_entity_blob, flags, source_job_id, source_event_id)
+                    old_block_id, new_block_id, old_block_entity_blob, new_block_entity_blob, flags, source_job_id, source_event_id, layer)
                 VALUES (
                     $worldId, $x, $y, $z, $chunkX, $chunkY, $chunkZ, $occurredAt, $actorId, $causeId, $actionId,
-                    $oldBlockId, $newBlockId, $oldBlockEntityBlob, $newBlockEntityBlob, $flags, $sourceJobId, $sourceEventId);
+                    $oldBlockId, $newBlockId, $oldBlockEntityBlob, $newBlockEntityBlob, $flags, $sourceJobId, $sourceEventId, $layer);
                 """;
 
             command.Parameters.AddWithValue("$worldId", worldId);
@@ -64,11 +72,11 @@ internal sealed class SqliteAuditWriteStore
             command.Parameters.AddWithValue("$flags", auditEvent.Flags);
             command.Parameters.AddWithValue("$sourceJobId", auditEvent.SourceJobId.HasValue ? auditEvent.SourceJobId.Value : DBNull.Value);
             command.Parameters.AddWithValue("$sourceEventId", auditEvent.SourceEventId.HasValue ? auditEvent.SourceEventId.Value : DBNull.Value);
+            command.Parameters.AddWithValue("$layer", auditEvent.Layer);
 
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task WriteContainerTransactionsAsync(IReadOnlyList<ContainerAuditTransaction> transactions, CancellationToken cancellationToken)
@@ -80,6 +88,14 @@ internal sealed class SqliteAuditWriteStore
 
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        await WriteContainerTransactionsAsync(connection, transaction, transactions, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _resolver.PublishCommittedLookups(transaction);
+    }
+
+    internal async Task WriteContainerTransactionsAsync(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyList<ContainerAuditTransaction> transactions, CancellationToken cancellationToken)
+    {
 
         foreach (var auditTransaction in transactions)
         {
@@ -150,6 +166,5 @@ internal sealed class SqliteAuditWriteStore
             }
         }
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 }

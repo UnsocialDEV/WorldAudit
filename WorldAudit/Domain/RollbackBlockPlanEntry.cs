@@ -11,7 +11,10 @@ public sealed record RollbackBlockPlanEntry(
     DateTimeOffset SourceOccurredAt,
     string? TargetBlockCode,
     byte[]? TargetBlockEntitySnapshot,
-    int ExecutionOrder)
+    int ExecutionOrder,
+    string? ExpectedBlockCode = null,
+    byte[]? ExpectedBlockEntitySnapshot = null,
+    int Layer = 1)
     : RollbackPlanEntry(
         JobEntryId,
         JobId,

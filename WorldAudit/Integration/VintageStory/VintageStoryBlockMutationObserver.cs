@@ -232,7 +232,7 @@ public sealed class VintageStoryBlockMutationObserver
 
     private static BlockPosition ToPosition(BlockPos pos)
     {
-        return new BlockPosition(pos.X, pos.Y, pos.Z);
+        return new BlockPosition(pos.X, pos.InternalY, pos.Z);
     }
 
     private static BlockPos ToBlockPos(BlockPosition position)

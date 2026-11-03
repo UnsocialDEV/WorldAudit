@@ -1,8 +1,8 @@
 # WorldAudit
 
-![Version](https://img.shields.io/badge/version-1.0.0-2f6fed)
+![Version](https://img.shields.io/badge/version-1.1.0-2f6fed)
 ![Side](https://img.shields.io/badge/side-server-3ba55d)
-![Framework](https://img.shields.io/badge/.NET-8.0-512bd4)
+![Framework](https://img.shields.io/badge/.NET-10.0-512bd4)
 
 Server-side block, container, lookup, and rollback auditing for Vintage Story.
 
@@ -14,6 +14,25 @@ Useful links:
 - [Benchmark notes](benchmarks/WorldAudit.Benchmarks/README.md)
 - [Support Discord](https://discord.gg/5365aHU7rt)
 - [License](LICENSE.txt)
+
+## Vintage Story 1.22.7 reliability update
+
+Build with the .NET 10 SDK and the 1.22.7 game installation. Set `VINTAGESTORY_API_PATH` to its `VintagestoryAPI.dll`; the adjacent game `Lib/0Harmony.dll` is used at runtime. Tests additionally load the installed game implementation assemblies and their dependencies. No game binaries are distributed in the mod zip.
+
+The capture hooks surround server block/item/entity packets, inventory operations, block exchange, and bulk commit. Tree/door parts retain the operation's player; container transfers use the acting player, never the last viewer. Fire and bombs retain the game's stored initiating UID. Gravity, liquid flow, decay, world generation accessor writes, and selected growth ticks use explicit cause contexts. Unknown provenance stays `#unknown`. These hooks do not claim to cover mods that mutate raw chunk arrays or invent their own inventory/event protocols.
+
+Rollback compares the expected current block, layer, and entity state before changing it. Container rollback checks changed slots and preserves unrelated slots and normal food aging. Actual before/after states and job results share one SQLite transaction; a failed result write is retried without repeating the world mutation. Interrupted jobs become paused: inspect `/wa job <id>`, use `/wa apply <id>` to resume or `/wa cancel <id>` to discard remaining work. Cancel abandoned previews to release their maintenance protection. Reload waits for active rollback work to finish.
+
+Upgrade notes:
+
+- Back up the world and audit database before installing a schema upgrade. Schema 8 adds block layers and undo-source tracking. It cancels unfinished legacy plans whose save/layer ownership cannot be verified, while retaining their entries and audit history.
+- Old records have no trustworthy dimension/layer information. Their bytes are preserved; legacy block entries with an unknown layer are rejected by rollback rather than guessed. Previously missing snapshots and `#unknown` player identities cannot be reconstructed.
+- New history uses `SavegameIdentifier`, so renaming a world does not change its identity and same-name worlds remain separate. Old name-keyed history remains in the database under its original identity. It is not automatically adopted because identical names may refer to different saves; any explicit database reassociation requires independently confirming which save owns those rows.
+- A hard process/power failure between a world change and its audit commit cannot be atomic across the game save and SQLite. Restart pauses unfinished jobs; expected-state checks make a conflicting replay fail safely.
+
+Validation includes 142 unit tests and a [disposable 1.22.7 server suite](tests/WorldAudit.ServerTests/README.md). The server suite exercises two distinct server players, ordinary placement/breaking, tree felling, single/paired/rotated doors, chiseling, shared chests, rollback/undo, and preservation of newer player edits. The driver uses real game handlers and persisted history; it does not test client rendering or network authentication. Separate client acceptance is still needed for those paths and third-party mod combinations.
+
+Live testing also found and fixed paired-door state capture, multiblock removal callbacks during undo, the game's asymmetric chisel snow-array restore, and stale server door collision boxes after snapshot restore. Solid block replay exchanges the planned cell and explicitly recreates its block entity, so removal callbacks cannot delete an unplanned door part.
 
 ## Table of Contents
 
@@ -175,7 +194,7 @@ Before using the mod on a live world, review these items:
 - Current version: `1.0.0`
 - Side: `Server`
 - Game dependency: `*`
-- Target framework: `.NET 8`
+- Target framework: `.NET 10`
 - Packaged SQLite native runtimes: `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64`
 
 ## Quick Start
@@ -550,7 +569,7 @@ The database is indexed for exact-position lookup, radius lookup, actor or cause
 
 ### Prerequisites
 
-- .NET 8 SDK
+- .NET 10 SDK
 - A resolvable `VintagestoryAPI.dll` for compile-time reference
 
 ### Resolving the Vintage Story API assembly
@@ -583,9 +602,9 @@ dotnet publish .\WorldAudit\WorldAudit.csproj -c Release
 
 The publish target prepares:
 
-- `WorldAudit/bin/Release/net8.0/publish/`
-- `WorldAudit/bin/Release/net8.0/vintagestory-package/`
-- `WorldAudit/bin/Release/net8.0/WorldAudit-vintagestory.zip`
+- `WorldAudit/bin/Release/net10.0/publish/`
+- `WorldAudit/bin/Release/net10.0/vintagestory-package/`
+- `WorldAudit/bin/Release/net10.0/WorldAudit-vintagestory.zip`
 
 ### Override packaged native runtimes
 

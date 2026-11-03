@@ -636,6 +636,29 @@ public sealed class RollbackWorkflowTests : IAsyncLifetime
         await runtime.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [Fact]
+    public async Task ContainerRollback_LogsRemovalAndAdditionWhenItemIdentityChanges()
+    {
+        var position = new BlockPosition(1, 64, 1);
+        var before = CreateSnapshot(("game:clay", 0, 8));
+        var after = CreateSnapshot(("game:sand", 0, 3));
+        await _runtime.Repository.WriteContainerTransactionsAsync([
+            new ContainerAuditTransaction(null, "main", position, DateTimeOffset.UtcNow, new("Alice", "alice"),
+                AuditCause.Player, "chest", null, before, after, [])]);
+        var source = Assert.Single(await _runtime.Repository.GetContainerHistoryAsync(new("main", position)));
+        var job = await _runtime.Repository.CreateRollbackJobAsync(
+            new("main", new("Admin", "admin"), RollbackJobOperation.Rollback, "swap", RollbackJobState.Previewed, 0, 1, 0, source.OccurredAt),
+            [new(RollbackJobEntryTargetType.Container, source.Id!.Value, 0)]);
+        _containerApplier.SetCurrentSnapshot(position, after);
+        await _runtime.RollbackCoordinator.QueueApplyAsync(job.Id);
+        await _runtime.ProcessRollbackTickAsync();
+        var mutation = Assert.Single((await _runtime.Repository.GetContainerHistoryAsync(new("main", position)))
+            .Where(transaction => transaction.SourceJobId == job.Id));
+        Assert.Equal(2, mutation.Lines.Count);
+        Assert.Equal(-3, Assert.Single(mutation.Lines.Where(line => line.ItemCode == "game:sand")).QuantityDelta);
+        Assert.Equal(8, Assert.Single(mutation.Lines.Where(line => line.ItemCode == "game:clay")).QuantityDelta);
+    }
+
     private sealed class FakeRollbackBlockApplier : IRollbackBlockApplier
     {
         private readonly Dictionary<BlockPosition, string> _currentBlocks = [];
@@ -676,7 +699,7 @@ public sealed class RollbackWorkflowTests : IAsyncLifetime
             var changed = !string.Equals(previous, next, StringComparison.OrdinalIgnoreCase);
             ReceivedSnapshots[entry.Position] = entry.TargetBlockEntitySnapshot;
             _currentBlocks[entry.Position] = next;
-            return Task.FromResult(new RollbackBlockApplyResult(RollbackBlockApplyStatus.Applied, changed, previous));
+            return Task.FromResult(new RollbackBlockApplyResult(RollbackBlockApplyStatus.Applied, changed, previous, PreviousBlockEntitySnapshot: entry.ExpectedBlockEntitySnapshot, ActualBlockCode: next, ActualBlockEntitySnapshot: entry.TargetBlockEntitySnapshot));
         }
     }
 
@@ -715,7 +738,7 @@ public sealed class RollbackWorkflowTests : IAsyncLifetime
             AppliedEntries.Add(entry.JobEntryId);
             var changed = !SnapshotsEqual(previous, entry.TargetSnapshot);
             _currentSnapshots[entry.Position] = entry.TargetSnapshot;
-            return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Applied, changed, previous));
+            return Task.FromResult(new RollbackContainerApplyResult(RollbackContainerApplyStatus.Applied, changed, previous, ActualSnapshot: entry.TargetSnapshot));
         }
     }
 

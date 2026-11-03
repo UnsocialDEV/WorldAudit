@@ -10,7 +10,7 @@ public sealed record BlockMutationScope(
     byte[]? OldBlockEntitySnapshot = null,
     DateTimeOffset? ExpiresAt = null)
 {
-    public bool IsSynthetic => Cause != AuditCause.Player;
+    public bool IsSynthetic => Cause != AuditCause.Player && string.IsNullOrWhiteSpace(ActorExternalId);
 
     public static BlockMutationScope Player(
         string actorName,

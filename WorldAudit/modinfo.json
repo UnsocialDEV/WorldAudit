@@ -2,11 +2,11 @@
     "type": "code",
     "modid": "worldaudit",
     "name": "WorldAudit",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Powerful block logging and rollback",
     "authors": [ "Unsocial" ],
     "side": "Server",
     "dependencies": {
-        "game": "*"
+        "game": "1.22.7"
     }
 }

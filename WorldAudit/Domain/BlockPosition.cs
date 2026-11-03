@@ -2,6 +2,9 @@ namespace WorldAudit.Domain;
 
 public readonly record struct BlockPosition(int X, int Y, int Z)
 {
+    // Y uses Vintage Story's InternalY encoding so existing dimension-zero rows stay valid.
+    public int Dimension => Y / 32768;
+    public int LocalY => Y % 32768;
     public ChunkPosition ToChunkPosition(int chunkSize)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(chunkSize, 0);
@@ -13,6 +16,7 @@ public readonly record struct BlockPosition(int X, int Y, int Z)
 
     public long DistanceSquaredTo(BlockPosition other)
     {
+        if (Dimension != other.Dimension) return long.MaxValue;
         var dx = (long)X - other.X;
         var dy = (long)Y - other.Y;
         var dz = (long)Z - other.Z;

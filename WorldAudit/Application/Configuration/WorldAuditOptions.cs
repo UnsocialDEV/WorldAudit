@@ -2,6 +2,7 @@ namespace WorldAudit.Application.Configuration;
 
 public sealed class WorldAuditOptions
 {
+    public string? WorldId { get; init; }
     public string DatabasePath { get; init; } = Path.Combine(AppContext.BaseDirectory, "worldaudit.db");
 
     public int WriterBatchSize { get; init; } = 128;

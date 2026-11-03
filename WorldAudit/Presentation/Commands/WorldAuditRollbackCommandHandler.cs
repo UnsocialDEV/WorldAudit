@@ -65,7 +65,7 @@ internal sealed class WorldAuditRollbackCommandHandler
             }
 
             var job = _context.Runtime.RollbackCoordinator.QueueApplyAsync(jobId).GetAwaiter().GetResult();
-            if (job is null)
+            if (job is null || job.WorldId != _context.GetWorldId())
             {
                 return TextCommandResult.Error($"[WA] Job #{jobId} was not found.", "job_missing");
             }
@@ -112,6 +112,26 @@ internal sealed class WorldAuditRollbackCommandHandler
         });
     }
 
+    public TextCommandResult HandleCancel(TextCommandCallingArgs args)
+    {
+        return _context.ExecuteSafely("cancel rollback job", () =>
+        {
+            if (!WorldAuditCommandText.TryParseJobId(args, out var jobId))
+                return TextCommandResult.Error("[WA] Provide a numeric job id, for example /wa cancel 12.", "bad_job");
+            try
+            {
+                var job = _context.Runtime.RollbackCoordinator.CancelAsync(jobId).GetAwaiter().GetResult();
+                return job is null
+                    ? TextCommandResult.Error($"[WA] Job #{jobId} was not found.", "job_missing")
+                    : TextCommandResult.Success($"[WA] Job #{jobId} cancelled.", jobId);
+            }
+            catch (InvalidOperationException exception)
+            {
+                return TextCommandResult.Error($"[WA] {exception.Message}", "bad_cancel");
+            }
+        });
+    }
+
     public TextCommandResult HandleJob(TextCommandCallingArgs args)
     {
         return _context.ExecuteSafely("show rollback job", () =>
@@ -127,7 +147,7 @@ internal sealed class WorldAuditRollbackCommandHandler
             }
 
             var job = _context.Runtime.Repository.GetRollbackJobAsync(jobId).GetAwaiter().GetResult();
-            if (job is null)
+            if (job is null || job.WorldId != _context.GetWorldId())
             {
                 return TextCommandResult.Error($"[WA] Job #{jobId} was not found.", "job_missing");
             }

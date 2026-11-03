@@ -96,6 +96,7 @@ public sealed class WorldAuditModConfig
     {
         return new WorldAuditOptions
         {
+            WorldId = (api as Vintagestory.API.Server.ICoreServerAPI)?.WorldManager?.SaveGame?.SavegameIdentifier,
             DatabasePath = ResolveDatabasePath(DatabasePath, api),
             WriterBatchSize = WriterBatchSize,
             WriterMaxFlushDelay = TimeSpan.FromMilliseconds(WriterMaxFlushDelayMilliseconds),
