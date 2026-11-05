@@ -75,6 +75,10 @@ public sealed class LookupCommandParser
             if (token.StartsWith("u:", StringComparison.OrdinalIgnoreCase))
             {
                 var value = token[2..];
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    throw new FormatException($"Invalid user token '{token}'; use u:PlayerName or u:#cause.");
+                }
                 if (TryParseCause(value, out var parsedCause))
                 {
                     cause = parsedCause;
@@ -113,7 +117,10 @@ public sealed class LookupCommandParser
                 }
 
                 pageSize = parsedPageSize;
+                continue;
             }
+
+            throw new FormatException($"Unknown filter '{token}'. Use u:PlayerName, t:time, r:radius, a:action, i:codes, e:codes, p:count, -b or -c.");
         }
 
         if (!explicitScope)

@@ -5,6 +5,17 @@ namespace WorldAudit.Tests;
 
 public sealed class LookupCommandParserTests
 {
+    [Theory]
+    [InlineData("unsocial")]
+    [InlineData("user:Unsocial")]
+    [InlineData("-containers")]
+    [InlineData("u:")]
+    public void Parse_RejectsInvalidFiltersInsteadOfBroadeningSelection(string token)
+    {
+        var error = Assert.Throws<FormatException>(() => new LookupCommandParser().Parse([token], DateTimeOffset.UtcNow));
+        Assert.Contains(token, error.Message);
+    }
+
     [Fact]
     public void Parse_RecognizesTimeRadiusActorAndAction()
     {

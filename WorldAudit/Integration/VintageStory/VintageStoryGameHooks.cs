@@ -53,7 +53,8 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
             _harmony.Patch(AccessTools.DeclaredMethod(bulkType, "Rollback"), postfix: new HarmonyMethod(typeof(VintageStoryGameHooks), nameof(DiscardQueued)));
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies().Where(a => a.GetName().Name is "VintagestoryAPI" or "VintagestoryLib" or "VSSurvivalMod" or "VSEssentials" or "VSCreativeMod"))
             {
-                foreach (var type in assembly.GetTypes())
+                foreach (var type in GetLoadableTypes(assembly, _api.Logger).Where(type =>
+                    typeof(IBlockAccessor).IsAssignableFrom(type) || typeof(Block).IsAssignableFrom(type) || typeof(BlockEntity).IsAssignableFrom(type)))
                 {
                     foreach (var method in type.GetMethods(DeclaredMethods).Where(m => !m.IsAbstract && !m.ContainsGenericParameters))
                     {
@@ -74,6 +75,21 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
         {
             _harmony.UnpatchAll(PatchId);
             throw;
+        }
+    }
+
+    internal static Type[] GetLoadableTypes(Assembly assembly, ILogger logger)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException exception)
+        {
+            var types = exception.Types.OfType<Type>().ToArray();
+            var failures = string.Join(" | ", exception.LoaderExceptions.OfType<Exception>().Select(error => error.Message).Distinct());
+            logger.Warning($"[WorldAudit] Assembly {assembly.GetName().Name}: scanning {types.Length} loadable types; {exception.Types.Length - types.Length} types unavailable. Loader errors: {failures}");
+            return types;
         }
     }
 

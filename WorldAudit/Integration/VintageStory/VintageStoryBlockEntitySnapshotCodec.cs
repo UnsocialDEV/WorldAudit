@@ -63,8 +63,9 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
                 AccessTools.Field(door.GetType(), "boxesClosed").SetValue(door, blockEntity.Block.CollisionBoxes);
                 AccessTools.Method(door.GetType(), "SetupRotationsAndColSelBoxes").Invoke(door, [false]);
             }
-            if (!TryValidateBlockEntity(blockEntity, out error))
+            if (!AreEquivalent(snapshot, Capture(pos)))
             {
+                error = "Restored block entity does not match the requested snapshot; inventory and block state recovery could not be verified.";
                 return false;
             }
 

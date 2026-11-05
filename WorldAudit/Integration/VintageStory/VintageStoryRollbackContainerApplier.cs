@@ -210,12 +210,18 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
                 var itemSlot = inventory[preparedSlot.SlotId];
                 if (SnapshotsEqual(itemSlot.Itemstack?.ToBytes(), preparedSlot.ItemStack?.ToBytes())) continue;
                 mutationAttempted = true;
-                itemSlot.Itemstack = preparedSlot.ItemStack;
+                itemSlot.Itemstack = preparedSlot.ItemStack?.Clone();
                 inventory.DidModifyItemSlot(itemSlot);
                 inventory.MarkSlotDirty(preparedSlot.SlotId);
             }
 
             container.CheckInventoryClearedMidTick();
+            foreach (var slot in snapshot.Slots)
+            {
+                if (StacksEquivalent(inventory[slot.SlotId].Itemstack, slot.ItemStack)) continue;
+                error = $"Container slot {slot.SlotId} does not match the requested restored state.";
+                return false;
+            }
             return true;
         }
         catch (Exception exception)

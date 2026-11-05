@@ -212,19 +212,23 @@ internal sealed class WorldAuditRollbackCommandHandler
                 var filters = _context.LookupCommandParser.Parse(tokens, DateTimeOffset.UtcNow);
 
                 var center = WorldAuditCommandText.GetPlayerBlockPosition(player);
+                var period = filters.TimeRange is { } range
+                    ? $"{range.FromInclusive:yyyy-MM-dd HH:mm:ss} to {range.ToInclusive:yyyy-MM-dd HH:mm:ss} UTC"
+                    : "all retained history";
+                var summary = $"{string.Join(' ', tokens)} | center: {WorldAuditCommandText.FormatDisplayPosition(_context.Api, center)} | radius: {filters.Radius ?? 5} | {period}";
                 var previewTask = operation == RollbackJobOperation.Rollback
                     ? _context.Runtime.RollbackPlanner.PreviewRollbackAsync(
                         _context.GetWorldId(),
                         center,
                         filters,
                         new AuditActor(player.PlayerName, player.PlayerUID),
-                        string.Join(' ', tokens))
+                        summary)
                     : _context.Runtime.RollbackPlanner.PreviewRestoreAsync(
                         _context.GetWorldId(),
                         center,
                         filters,
                         new AuditActor(player.PlayerName, player.PlayerUID),
-                        string.Join(' ', tokens));
+                        summary);
 
                 var createdJob = previewTask.GetAwaiter().GetResult();
                 WorldAuditCommandText.SendPreviewReady(player, createdJob);

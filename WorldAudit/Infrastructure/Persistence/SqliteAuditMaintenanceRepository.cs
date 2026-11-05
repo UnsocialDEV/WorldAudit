@@ -23,7 +23,7 @@ public sealed class SqliteAuditMaintenanceRepository : IAuditMaintenanceReposito
 
     public async Task<SqliteMaintenanceSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken, commandTimeoutSeconds: 5).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT sqlite_version();";
         var version = (string?)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? "unknown";
@@ -46,22 +46,40 @@ public sealed class SqliteAuditMaintenanceRepository : IAuditMaintenanceReposito
 
     public async Task<PurgePreview> PreviewPurgeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        var cutoffMs = cutoff.ToUnixTimeMilliseconds();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        await using var connection = await _connectionFactory.OpenConnectionAsync(deadline.Token, commandTimeoutSeconds: 5).ConfigureAwait(false);
+        // SQLite async calls run synchronously; its progress callback must interrupt long scans.
+        SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 1000,
+            static state => ((CancellationToken)state).IsCancellationRequested ? 1 : 0, deadline.Token);
+        try
+        {
+            var cutoffMs = cutoff.ToUnixTimeMilliseconds();
 
-        var blockCount = await CountAsync(
-            connection,
-            "SELECT COUNT(*) FROM block_events WHERE occurred_at_ms < $cutoff;",
-            cutoffMs,
-            cancellationToken).ConfigureAwait(false);
-        var containerCount = await CountAsync(
-            connection,
-            "SELECT COUNT(*) FROM container_transactions WHERE occurred_at_ms < $cutoff;",
-            cutoffMs,
-            cancellationToken).ConfigureAwait(false);
-        var rollbackJobCount = await CountTerminalRollbackJobsAsync(connection, cutoffMs, cancellationToken).ConfigureAwait(false);
+            var blockCount = await CountAsync(
+                connection,
+                "SELECT COUNT(*) FROM block_events WHERE occurred_at_ms < $cutoff;",
+                cutoffMs,
+                deadline.Token).ConfigureAwait(false);
+            var containerCount = await CountAsync(
+                connection,
+                "SELECT COUNT(*) FROM container_transactions WHERE occurred_at_ms < $cutoff;",
+                cutoffMs,
+                deadline.Token).ConfigureAwait(false);
+            var rollbackJobCount = await CountTerminalRollbackJobsAsync(connection, cutoffMs, deadline.Token).ConfigureAwait(false);
 
-        return new PurgePreview(cutoff, blockCount, containerCount, rollbackJobCount);
+            return new PurgePreview(cutoff, blockCount, containerCount, rollbackJobCount);
+        }
+        catch (Exception exception) when (deadline.IsCancellationRequested
+            && (exception is OperationCanceledException || exception is SqliteException { SqliteErrorCode: 9 }))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new TimeoutException("Purge preview exceeded 10 seconds. No records were deleted.", exception);
+        }
+        finally
+        {
+            SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 0, null, null);
+        }
     }
 
     public async Task<PurgeResult> ExecutePurgeAsync(

@@ -9,6 +9,20 @@ namespace WorldAudit.Tests;
 
 public sealed class VintageStoryBlockEntitySnapshotCodecTests
 {
+    [Fact]
+    public void Restore_RejectsSilentlyIgnoredInventoryState()
+    {
+        var entity = new SnapshotEntity { Value = "recorded", Quantity = 42 };
+        var codec = CreateCodec(entity);
+        var snapshot = codec.Capture(new BlockPos(0))!;
+        entity.Quantity = 0;
+        entity.IgnoreInventoryRestore = true;
+
+        Assert.False(codec.TryRestore(new BlockPos(0), snapshot, out var error));
+        Assert.Contains("match", error!, StringComparison.OrdinalIgnoreCase);
+        Assert.False(entity.Dirty);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -88,6 +102,7 @@ public sealed class VintageStoryBlockEntitySnapshotCodecTests
         public string Value = "";
         public int Quantity;
         public bool ThrowOnCapture;
+        public bool IgnoreInventoryRestore;
         public bool Dirty;
         public override void ToTreeAttributes(ITreeAttribute tree)
         {
@@ -100,7 +115,7 @@ public sealed class VintageStoryBlockEntitySnapshotCodecTests
         public override void FromTreeAttributes(ITreeAttribute tree, IWorldAccessor worldAccessForResolve)
         {
             Value = tree.GetString("value");
-            Quantity = tree.GetTreeAttribute("inventory").GetInt("quantity");
+            if (!IgnoreInventoryRestore) Quantity = tree.GetTreeAttribute("inventory").GetInt("quantity");
         }
         public override void MarkDirty(bool redrawOnClient = false, IPlayer? skipPlayer = null) => Dirty = true;
     }

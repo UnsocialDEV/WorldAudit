@@ -12,6 +12,7 @@ using Vintagestory.Server;
 using WorldAudit.Application.Services;
 using WorldAudit.Domain;
 using WorldAudit.Integration.VintageStory;
+using WorldAudit.Infrastructure.Persistence;
 using WorldAudit.Mod;
 
 namespace WorldAudit.ServerTests;
@@ -51,7 +52,7 @@ public sealed class ServerTests : ModSystem
         });
     }
 
-    private void Run()
+    private async void Run()
     {
         try
         {
@@ -65,13 +66,94 @@ public sealed class ServerTests : ModSystem
             Check("restored rotated door collision boxes", RotatedDoor);
             Check("chisel conversion, voxel edit + rollback/undo", Chisel);
             Check("shared chest attribution + selective rollback/undo", SharedChest);
+            Check("filled trunk break preserves contents through rollback/undo", FilledTrunk);
             Check("rollback preserves newer player changes", RollbackConflict);
+            Check("config reload keeps block and container capture active", ReloadCapture);
+            await AdminReadKeepsTicking();
         }
         catch (Exception e) { results.Add(new { name = "fixture startup", passed = false, error = e.ToString() }); }
         finally
         {
             File.WriteAllText(ReportPath, JsonSerializer.Serialize(new { game = GameVersion.ShortGameVersion, world = api.WorldManager.SaveGame.SavegameIdentifier, results }, new JsonSerializerOptions { WriteIndented = true }));
             api.Logger.Notification("[WorldAudit.ServerTests] Finished. {0}", ReportPath);
+        }
+    }
+
+    private void ReloadCapture()
+    {
+        TextCommandResult? response = null;
+        api.ChatCommands.ExecuteUnparsed("/wa reload", new TextCommandCallingArgs
+        {
+            Caller = new Caller { Type = EnumCallerType.Console, CallerPrivileges = ["*"] },
+            LanguageCode = "en"
+        }, result => response = result);
+        Require(response?.Status == EnumCommandStatus.Success, "Reload failed: " + response?.StatusMessage);
+        runtime = (WorldAuditRuntime)AccessTools.Field(typeof(WorldAuditModSystem), "_runtime").GetValue(api.ModLoader.GetModSystem<WorldAuditModSystem>())!;
+        var pos = Pos(520).AddCopy(0, 0, 20); Clear(pos);
+        Equip(alice, "game:rock-granite"); PlaceBreak(alice, pos, true);
+        LatestActor(pos, alice);
+        pos = pos.AddCopy(0, 0, 2); Clear(pos);
+        api.World.BlockAccessor.SetBlock(Block("game:trunk-east").Id, pos);
+        var inventory = (InventoryBase)((IBlockEntityContainer)api.World.BlockAccessor.GetBlockEntity(pos)).Inventory;
+        alice.Player.InventoryManager.OpenInventory(inventory);
+        Move(alice, inventory, 0, Stack("game:rock-granite", 2));
+        alice.Player.InventoryManager.CloseInventory(inventory);
+        runtime.FlushAsync().GetAwaiter().GetResult();
+        var transactions = runtime.Repository.GetContainerHistoryAsync(new(runtime.Options.WorldId!, AuditPos(pos), Limit: 100)).GetAwaiter().GetResult();
+        Require(transactions.Any(row => row.Actor.ExternalId == alice.Player.PlayerUID && row.Lines.Any(line => line.QuantityDelta == 2)), "Container capture did not persist after reload.");
+    }
+
+    private async Task AdminReadKeepsTicking()
+    {
+        const string name = "purge preview leaves game ticks running during a database lock";
+        var ticks = 0;
+        var listener = api.Event.RegisterGameTickListener(_ => Interlocked.Increment(ref ticks), 50);
+        try
+        {
+            await runtime.FlushAsync();
+            await using var connection = await new SqliteConnectionFactory(runtime.Options).OpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+                command.CommandText = "DELETE FROM block_events WHERE 0;";
+                await command.ExecuteNonQueryAsync();
+            }
+            var before = Volatile.Read(ref ticks);
+            var invoked = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+            api.Event.EnqueueMainThreadTask(() =>
+            {
+                try
+                {
+                    var timer = System.Diagnostics.Stopwatch.StartNew();
+                    api.ChatCommands.ExecuteUnparsed("/wa purge t:1s", new TextCommandCallingArgs
+                    {
+                        Caller = new Caller { Type = EnumCallerType.Console, CallerPrivileges = ["*"] },
+                        LanguageCode = "en"
+                    }, result =>
+                    {
+                        if (result.Status == EnumCommandStatus.Error) invoked.TrySetException(new InvalidOperationException(result.StatusMessage));
+                    });
+                    invoked.TrySetResult(timer.Elapsed);
+                }
+                catch (Exception exception) { invoked.TrySetException(exception); }
+            }, "worldaudit-test-preview");
+            var elapsed = await invoked.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            if (elapsed > TimeSpan.FromMilliseconds(250)) throw new InvalidOperationException("Preview blocked the game thread.");
+            await Task.Delay(1000);
+            var advanced = Volatile.Read(ref ticks) - before;
+            await transaction.RollbackAsync();
+            if (advanced < 5) throw new InvalidOperationException($"Only {advanced} game ticks ran during the lock.");
+            await Task.Delay(250);
+            results.Add(new { name, passed = true, ticksDuringLock = advanced });
+        }
+        catch (Exception exception)
+        {
+            results.Add(new { name, passed = false, error = exception.ToString() });
+        }
+        finally
+        {
+            api.Event.EnqueueMainThreadTask(() => api.Event.UnregisterGameTickListener(listener), "worldaudit-test-heartbeat-stop");
         }
     }
 
@@ -276,6 +358,34 @@ public sealed class ServerTests : ModSystem
         history = runtime.Repository.GetContainerHistoryAsync(new(runtime.Options.WorldId!, AuditPos(pos), Limit: 100)).GetAwaiter().GetResult();
         Require(history.Count(t => t.SourceJobId is null) == 2, "Rollback leaked ordinary chest audit events");
     }
+    private void FilledTrunk()
+    {
+        var pos = Pos(540, 548); Clear(pos);
+        api.World.BlockAccessor.SetBlock(Block("game:trunk-east").Id, pos);
+        var inventory = (InventoryBase)((IBlockEntityContainer)api.World.BlockAccessor.GetBlockEntity(pos)).Inventory;
+        alice.Player.InventoryManager.OpenInventory(inventory);
+        var tool = Stack("game:axe-flint", 1);
+        tool.Attributes.SetInt("durability", 17);
+        tool.Attributes.SetString("recovery-test", "keep custom attributes");
+        Move(alice, inventory, 0, tool);
+        Move(alice, inventory, 11, Stack("game:rock-granite", 64));
+        alice.Player.InventoryManager.CloseInventory(inventory);
+        var expectedTool = inventory[0].Itemstack!.ToBytes();
+        var expectedStone = inventory[11].Itemstack!.ToBytes();
+
+        Equip(alice, null); PlaceBreak(alice, pos, false);
+        Require(api.World.BlockAccessor.GetBlock(pos).Id == 0, "Filled trunk was not broken");
+        var broken = LatestActor(pos, alice);
+        Require(broken.OldBlockEntitySnapshot is not null, "Filled trunk break did not retain its inventory snapshot");
+        var job = Rollback(pos, BlockAuditAction.Break);
+        var restored = (InventoryBase)((IBlockEntityContainer)api.World.BlockAccessor.GetBlockEntity(pos)).Inventory;
+        Require(restored.Count == inventory.Count, "Restored trunk has a different slot count");
+        Require(restored[0].Itemstack is not null && expectedTool.AsSpan().SequenceEqual(restored[0].Itemstack!.ToBytes()), "Restored tool or its attributes differ");
+        Require(restored[11].Itemstack is not null && expectedStone.AsSpan().SequenceEqual(restored[11].Itemstack!.ToBytes()), "Restored trunk lost its materials");
+        Undo(job);
+        Require(api.World.BlockAccessor.GetBlock(pos).Id == 0, "Undo did not return the trunk location to air");
+    }
+
     private void Move(ConnectedClient client, InventoryBase inventory, int slot, ItemStack stack)
     {
         var cursor = client.Player.InventoryManager.MouseItemSlot; cursor.Itemstack = stack;
