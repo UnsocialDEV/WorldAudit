@@ -57,10 +57,15 @@ internal sealed class WorldAuditCommandContext
 
     public TextCommandResult ExecuteSafely(string operation, Func<TextCommandResult> action)
     {
-        return WorldAuditSafeExecution.Run(
+        var result = WorldAuditSafeExecution.Run(
             Api,
             operation,
             action,
             message => TextCommandResult.Error(message, "worldaudit_failure"));
+        if (result.StatusMessage is not null)
+        {
+            result.StatusMessage = WorldAuditCommandText.EscapeChatText(result.StatusMessage);
+        }
+        return result;
     }
 }
