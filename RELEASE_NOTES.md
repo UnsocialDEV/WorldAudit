@@ -1,5 +1,11 @@
 # WorldAudit Release Notes
 
+## 1.1.1-pre.4 (unreleased)
+
+- Escape literal angle brackets in `/wa` and `/wa help` output, including placeholders such as `<time>` and `<jobId>`, so they do not become nested VTML tags or disrupt following chat messages.
+- Escape command-result messages, including syntax errors and invalid user input. Preserve text that is already escaped.
+- Add regression checks using the Vintage Story 1.22.7 VTML parser, covering help, returned/thrown errors, and following-message preservation.
+
 ## 1.1.1-pre.3 (unreleased)
 
 - Retain loadable game types when optional dependencies cause `Assembly.GetTypes()` to throw `ReflectionTypeLoadException`. Log the assembly, retained/unavailable type counts and loader errors.
