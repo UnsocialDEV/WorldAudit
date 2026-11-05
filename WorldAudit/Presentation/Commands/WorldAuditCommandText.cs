@@ -137,6 +137,7 @@ internal static class WorldAuditCommandText
     public static void SendPreviewReady(IServerPlayer player, RollbackJob job)
     {
         player.SendMessage(0, $"[WA] Preview {DescribeOperation(job.Operation)} job #{job.Id} ready.", EnumChatType.CommandSuccess, null);
+        player.SendMessage(0, $"[WA] Selection: {job.FilterSummary}", EnumChatType.CommandSuccess, null);
         player.SendMessage(
             0,
             $"[WA] Blocks: {job.PlannedBlockCount} | Containers: {job.PlannedContainerCount} | Chunks: {job.PlannedChunkCount} | Oldest edit: {FormatRelativeTime(job.OldestTargetOccurredAt, DateTimeOffset.UtcNow)}",
@@ -150,7 +151,11 @@ internal static class WorldAuditCommandText
         yield return "[WA] Status";
         yield return $"[WA] DB: {status.DatabasePath}";
         yield return $"[WA] SQLite: {status.SqliteVersion} | WAL: {FormatBytes(status.WalSizeBytes)}";
-        yield return $"[WA] Consumer: {(status.IsConsumerPaused ? "paused" : "running")} | Queue: {status.WriterSnapshot.PendingEvents} pending | Persisted: {status.WriterSnapshot.PersistedEvents}";
+        yield return $"[WA] Consumer: {(status.WriterSnapshot.LastError is not null ? "faulted" : status.IsConsumerPaused ? "paused" : "running")} | Queue: {status.WriterSnapshot.PendingEvents} pending | Persisted: {status.WriterSnapshot.PersistedEvents}";
+        if (status.WriterSnapshot.LastError is not null)
+        {
+            yield return $"[WA] Writer error: {status.WriterSnapshot.LastError}";
+        }
         yield return $"[WA] Flush: {status.WriterSnapshot.FlushCount} total | last {status.WriterSnapshot.LastFlushBatchSize} in {status.WriterSnapshot.LastFlushDuration.TotalMilliseconds:0.0} ms | largest batch {status.WriterSnapshot.LargestFlushBatchSize}";
         yield return $"[WA] Slow paths: queries {status.QueryPerformance.SlowQueryCount} | flushes {status.WriterSnapshot.SlowFlushCount} | WAL threshold {(status.IsWalThresholdExceeded ? "exceeded" : "ok")}";
         yield return $"[WA] Policy: checkpoint every {status.CheckpointPolicy.CheckpointInterval.TotalMinutes:0}m or {FormatBytes(status.CheckpointPolicy.WalSizeThresholdBytes)} WAL | optimize every {status.CheckpointPolicy.OptimizeInterval.TotalHours:0}h";

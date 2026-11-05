@@ -472,6 +472,7 @@ public sealed class RollbackWorkflowTests : IAsyncLifetime
 
         Assert.Equal(0, job.PlannedBlockCount);
         Assert.Equal(1, job.PlannedContainerCount);
+        Assert.Equal(1, job.PlannedChunkCount);
         Assert.Single(entries);
         Assert.IsType<RollbackContainerPlanEntry>(entries[0]);
     }

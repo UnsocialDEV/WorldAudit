@@ -12,6 +12,31 @@ namespace WorldAudit.Tests;
 public sealed class VintageStoryRollbackContainerApplierTests
 {
     [Fact]
+    public async Task ApplyAsync_CallbackChangesRestoredStack_ReportsFailureAndRestoresPreviousContents()
+    {
+        using var fixture = new ContainerTestFixture();
+        fixture.Inventory[0].Itemstack = fixture.Stack("game:torch", 5);
+        var target = Snapshot(fixture.Inventory);
+        fixture.Inventory[0].Itemstack!.StackSize = 3;
+        var expected = Snapshot(fixture.Inventory);
+        var intercept = true;
+        fixture.Inventory.SlotModified += _ =>
+        {
+            if (!intercept) return;
+            intercept = false;
+            fixture.Inventory[0].Itemstack!.StackSize = 1;
+        };
+
+        var result = await new VintageStoryRollbackContainerApplier(fixture.Api)
+            .ApplyAsync(Entry(fixture, expected, target));
+
+        Assert.Equal(RollbackContainerApplyStatus.Failed, result.Status);
+        Assert.False(result.ChangedWorld);
+        Assert.Contains("match", result.ErrorText!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(3, fixture.Inventory[0].StackSize);
+    }
+
+    [Fact]
     public async Task ApplyAsync_AfterRealFoodAging_AppliesQuantityChangeAndRetainsCurrentAge()
     {
         using var fixture = new ContainerTestFixture();

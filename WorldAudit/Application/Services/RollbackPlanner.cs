@@ -165,12 +165,13 @@ public sealed class RollbackPlanner
             if (entry.TargetType == RollbackJobEntryTargetType.Block)
             {
                 plannedBlockCount++;
-                chunkSet.Add(entry.Position.ToChunkPosition(_options.ChunkSize));
             }
             else
             {
                 plannedContainerCount++;
             }
+
+            chunkSet.Add(entry.Position.ToChunkPosition(_options.ChunkSize));
 
             if (!oldestTargetOccurredAt.HasValue || entry.OccurredAt < oldestTargetOccurredAt.Value)
             {

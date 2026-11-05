@@ -1,5 +1,22 @@
 # WorldAudit Release Notes
 
+## 1.1.1-pre.3 (unreleased)
+
+- Retain loadable game types when optional dependencies cause `Assembly.GetTypes()` to throw `ReflectionTypeLoadException`. Log the assembly, retained/unavailable type counts and loader errors.
+- Inspect methods only on block, block-entity and block-accessor types. Required hook failures continue to abort registration instead of silently disabling capture.
+- Fix the startup failure with missing `csogg` and `OpenTK.Graphics`, which left commands available while capture never initialized.
+- Run status and purge-preview database reads on a worker, returning replies on the game thread. Reject overlapping status/preview requests.
+- Interrupt purge-preview scans after 10 seconds and limit lock waits to 5 seconds per command. Preview remains read-only; cancellation removes its native callback before returning the connection to the pool.
+- Report a failed writer as `faulted` with its error instead of `running`.
+- Confirmed purge and other synchronous database commands remain outside this fix. Validate maintenance against a copy of production data before using them on a busy server.
+
+- Reject unrecognised filters and empty user filters instead of silently widening an admin selection.
+- Verify restored native block-entity state and container slots after game callbacks; report unsuccessful verification and retain the existing rollback-on-error path.
+- Display and retain the preview centre, radius and resolved UTC time range. Count chunks for container-only jobs, and show the installed version in `/wa status`.
+- Add regressions for ignored filters, silently discarded inventory restoration, callbacks changing restored stacks, and a filled native trunk's contents and item attributes through break/rollback/undo.
+
+Validated with 155 unit tests and 11 isolated native server scenarios on Linux/Vintage Story 1.22.7, with `csogg.dll` and `OpenTK.Graphics.dll` absent. Production installation and third-party mod compatibility remain unverified. This build cannot recreate events or inventory snapshots absent from historical data. Preserve the original world and audit database before installing it.
+
 ## 1.1.0 - 2026-11-03
 
 WorldAudit 1.1.0 improves player attribution, container history, and rollback safety for Vintage Story 1.22.7.

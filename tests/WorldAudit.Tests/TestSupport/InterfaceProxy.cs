@@ -96,6 +96,7 @@ internal sealed class TestPlayer : ServerPlayer, IServerPlayer
     internal Action<object?[]>? MessageHandler;
     string IPlayer.PlayerName => Name;
     string IPlayer.PlayerUID => Uid;
+    EntityPlayer IPlayer.Entity => null!;
     void IServerPlayer.SendMessage(int groupId, string message, EnumChatType chatType, string data)
         => MessageHandler?.Invoke([groupId, message, chatType, data]);
 }

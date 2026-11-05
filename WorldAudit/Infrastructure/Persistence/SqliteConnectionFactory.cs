@@ -26,18 +26,37 @@ public sealed class SqliteConnectionFactory
 
     public string WalPath => $"{_options.DatabasePath}-wal";
 
-    public async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
+    public Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
+        => OpenConnectionAsync(cancellationToken, commandTimeoutSeconds: null);
+
+    internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken, int? commandTimeoutSeconds)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_options.DatabasePath) ?? AppContext.BaseDirectory);
 
         var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
-        return connection;
+        if (commandTimeoutSeconds.HasValue)
+        {
+            connection.DefaultTimeout = commandTimeoutSeconds.Value;
+        }
+
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureConnectionAsync(connection, cancellationToken, commandTimeoutSeconds).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
-    private async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    private async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken, int? commandTimeoutSeconds)
     {
+        var busyTimeout = commandTimeoutSeconds.HasValue
+            ? Math.Min(_options.SqliteBusyTimeoutMilliseconds, commandTimeoutSeconds.Value * 1000)
+            : _options.SqliteBusyTimeoutMilliseconds;
         using var command = connection.CreateCommand();
         command.CommandText =
             $$"""
@@ -45,7 +64,7 @@ public sealed class SqliteConnectionFactory
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
             PRAGMA temp_store=MEMORY;
-            PRAGMA busy_timeout={{_options.SqliteBusyTimeoutMilliseconds}};
+            PRAGMA busy_timeout={{busyTimeout}};
             """;
 
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

@@ -7,7 +7,10 @@ This optional server mod invokes real game handlers with two registered `ServerP
 - Door halves, paired-door toggles, rotated server collision boxes, and rollback/undo without collateral `#unknown` events.
 - Chisel conversion and a voxel packet, including exact geometry and snow-cover roundtrip through rollback/undo.
 - Shared-chest inventory packets from two players; selective rollback preserves the other player's slot, and undo restores contents without duplicate ordinary events.
+- Breaking a filled trunk retains its native inventory snapshot; rollback restores quantities, durability and custom item attributes, and undo returns the location to air.
 - Refusal to overwrite a newer block placed by the other player.
+- Purge preview returns promptly while its database table is locked, and game ticks continue until the lock is released.
+- Configuration reload succeeds and leaves block capture and the container bridge active, including when optional client libraries are absent from a dedicated installation.
 
 Build and run from the repository root with .NET 10 and Vintage Story 1.22.7 installed:
 

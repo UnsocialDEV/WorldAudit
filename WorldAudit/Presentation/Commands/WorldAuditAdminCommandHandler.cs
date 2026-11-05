@@ -1,11 +1,13 @@
 using Vintagestory.API.Common;
 using Vintagestory.API.Server;
+using WorldAudit.Mod;
 
 namespace WorldAudit.Presentation.Commands;
 
 internal sealed class WorldAuditAdminCommandHandler
 {
     private readonly WorldAuditCommandContext _context;
+    private int _readInProgress;
 
     public WorldAuditAdminCommandHandler(WorldAuditCommandContext context)
     {
@@ -16,10 +18,13 @@ internal sealed class WorldAuditAdminCommandHandler
     {
         return _context.ExecuteSafely("status", () =>
         {
-            var status = _context.Runtime.GetStatusAsync().GetAwaiter().GetResult();
-            var lines = WorldAuditCommandText.FormatStatus(status).ToArray();
-            SendOptionalLines(args, lines);
-            return TextCommandResult.Success(lines[^1], null);
+            var runtime = _context.Runtime;
+            var version = _context.Api.ModLoader.GetMod("worldaudit")?.Info.Version ?? "unknown";
+            return StartRead(args, "status", async () =>
+            {
+                var status = await runtime.GetStatusAsync().ConfigureAwait(false);
+                return new[] { $"[WA] WorldAudit {version}" }.Concat(WorldAuditCommandText.FormatStatus(status)).ToArray();
+            });
         });
     }
 
@@ -67,12 +72,15 @@ internal sealed class WorldAuditAdminCommandHandler
                 var request = _context.PurgeCommandParser.Parse(WorldAuditCommandText.GetQueryTokens(args).ToArray());
                 if (!request.Confirm)
                 {
-                    var preview = _context.Runtime.PreviewPurgeAsync(request.Age).GetAwaiter().GetResult();
-                    var lines = WorldAuditCommandText.FormatPurgePreview(preview, request.Age).ToArray();
-                    SendOptionalLines(args, lines);
-                    return TextCommandResult.Success(lines[^1], null);
+                    var runtime = _context.Runtime;
+                    return StartRead(args, "purge preview", async () =>
+                    {
+                        var preview = await runtime.PreviewPurgeAsync(request.Age).ConfigureAwait(false);
+                        return WorldAuditCommandText.FormatPurgePreview(preview, request.Age).ToArray();
+                    });
                 }
 
+                // shortcut: confirmed purge stays synchronous until maintenance is coordinated with rollback jobs.
                 var result = _context.Runtime.ExecutePurgeAsync(request.Age).GetAwaiter().GetResult();
                 var resultLines = WorldAuditCommandText.FormatPurgeResult(result).ToArray();
                 SendOptionalLines(args, resultLines);
@@ -87,6 +95,52 @@ internal sealed class WorldAuditAdminCommandHandler
                 return TextCommandResult.Error($"[WA] {exception.Message}", "purge_blocked");
             }
         });
+    }
+
+    private TextCommandResult StartRead(TextCommandCallingArgs args, string operation, Func<Task<string[]>> read)
+    {
+        if (Interlocked.CompareExchange(ref _readInProgress, 1, 0) != 0)
+        {
+            return TextCommandResult.Error("[WA] A status or purge preview query is already running. Wait for its result.", "query_running");
+        }
+
+        var player = args.Caller?.Player as IServerPlayer;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await WorldAuditSafeExecution.RunAsync(_context.Api, operation,
+                    async () => Reply(await read().ConfigureAwait(false), EnumChatType.CommandSuccess),
+                    message =>
+                    {
+                        Reply([message], EnumChatType.CommandError);
+                        return Task.CompletedTask;
+                    }).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _readInProgress, 0);
+            }
+        });
+        return TextCommandResult.Deferred;
+
+        void Reply(string[] lines, EnumChatType type)
+        {
+            _context.Api.Event.EnqueueMainThreadTask(() => WorldAuditSafeExecution.Run(_context.Api, $"{operation} reply", () =>
+            {
+                foreach (var line in lines)
+                {
+                    if (player is not null)
+                    {
+                        player.SendMessage(0, line, type, null);
+                    }
+                    else
+                    {
+                        _context.Api.Logger.Notification("{0}", line);
+                    }
+                }
+            }), "worldaudit-admin-read");
+        }
     }
 
     private static void SendOptionalLines(TextCommandCallingArgs args, IReadOnlyList<string> lines)
