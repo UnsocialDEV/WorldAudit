@@ -1,27 +1,43 @@
 # WorldAudit Release Notes
 
-## 1.1.1-pre.4 (unreleased)
+## 1.1.1 - 2026-11-27
 
-- Escape literal angle brackets in `/wa` and `/wa help` output, including placeholders such as `<time>` and `<jobId>`, so they do not become nested VTML tags or disrupt following chat messages.
-- Escape command-result messages, including syntax errors and invalid user input. Preserve text that is already escaped.
-- Add regression checks using the Vintage Story 1.22.7 VTML parser, covering help, returned/thrown errors, and following-message preservation.
+WorldAudit 1.1.1 is a stable server-side release for Vintage Story 1.22.7 (.NET 10). It includes the following changes since 1.1.0.
 
-## 1.1.1-pre.3 (unreleased)
+### Inspect, lookup and attribution
 
-- Retain loadable game types when optional dependencies cause `Assembly.GetTypes()` to throw `ReflectionTypeLoadException`. Log the assembly, retained/unavailable type counts and loader errors.
-- Inspect methods only on block, block-entity and block-accessor types. Required hook failures continue to abort registration instead of silently disabling capture.
-- Fix the startup failure with missing `csogg` and `OpenTK.Graphics`, which left commands available while capture never initialized.
-- Run status and purge-preview database reads on a worker, returning replies on the game thread. Reject overlapping status/preview requests.
-- Interrupt purge-preview scans after 10 seconds and limit lock waits to 5 seconds per command. Preview remains read-only; cancellation removes its native callback before returning the connection to the pool.
-- Report a failed writer as `faulted` with its error instead of `running`.
-- Confirmed purge and other synchronous database commands remain outside this fix. Validate maintenance against a copy of production data before using them on a busy server.
+- Inspect shows storage visits with separate totals for items added and removed. Use `/wa i details <entryId> <page>` to see the original transfers, timestamps and slots. Older history groups consecutive transfers by the same player at the same storage across gaps of up to five seconds. Intervening actors and block changes end the group.
+- Inspect, lookup and job details go to the requesting moderator’s WorldAudit chat tab. Inspect cycles through three entries per page, with the newest at the bottom. Holding an inspect click no longer advances multiple pages. Command help, errors, player input and item names are escaped for Vintage Story chat markup.
+- Deferred inventory callbacks retain the initiating player on shared storage. Nested block operations can inherit a verified actor. Read-only inspection avoids unnecessary block-entity snapshots.
+- Lookup and rollback share code, action, time, radius and dimension filters. Storage searches can match a moved item, storage label (including facing variants) or inventory type. Block action filters restrict mixed searches to blocks. Invalid and empty user filters produce an error.
 
-- Reject unrecognised filters and empty user filters instead of silently widening an admin selection.
-- Verify restored native block-entity state and container slots after game callbacks; report unsuccessful verification and retain the existing rollback-on-error path.
-- Display and retain the preview centre, radius and resolved UTC time range. Count chunks for container-only jobs, and show the installed version in `/wa status`.
-- Add regressions for ignored filters, silently discarded inventory restoration, callbacks changing restored stacks, and a filled native trunk's contents and item attributes through break/rollback/undo.
+### Rollback, restore and undo
 
-Validated with 155 unit tests and 11 isolated native server scenarios on Linux/Vintage Story 1.22.7, with `csogg.dll` and `OpenTK.Graphics.dll` absent. Production installation and third-party mod compatibility remain unverified. This build cannot recreate events or inventory snapshots absent from historical data. Preserve the original world and audit database before installing it.
+- Previews flush pending audit writes and freeze every eligible match. `RollbackPreviewLimit` now sets the database write batch size. Job details retain the selection center, radius and UTC time range, count chunks for storage-only jobs, and show blocks, grouped storage visits and individual transactions on separate pages. Apply processes the full selection across all pages.
+- Mixed jobs link a broken container to its inventory teardown. A filled trunk and its contents are recovered once, while independent withdrawals remain eligible. Apply verifies restored block entities and affected slots after game callbacks, rejects incomplete recorded stacks, reports conflicts, and checks planned entries for missing or wrong-world sources.
+- Fire timer ticks no longer flood the writer, inspect pages or rollback jobs. Existing tick rows are filtered from history queries. House-fire rollbacks restore burned materials and skip flame placement and burnout. Rollback, restore and undo rebuild ground-storage piles extinguished and bombs unlit, preserving the pile’s contents and orientation and the bomb variant.
+- Area rollbacks skip changes made by earlier WorldAudit jobs by default. Use `/wa undo <jobId>` for one job or select `u:#rollback` or `u:#restore` explicitly. Inspect and lookup retain the job history.
+
+### Dedicated servers, performance and maintenance
+
+- Dedicated servers can initialize capture when optional client libraries such as `csogg` and `OpenTK.Graphics` are missing. Startup logs identify unavailable types, and required hook failures remain visible.
+- Status, lookup, nearby searches, rollback previews and purge commands run database work off the game thread. History queries filter and page IDs before loading snapshots. Purge previews interrupt scans after ten seconds and limit database lock waits to five seconds per command. Maintenance protects history needed by pending jobs.
+- The writer bounds queued events and payload bytes, including in-flight batches. Concurrent flushes share pending work. Status reports the installed version, backlog, rejected events and writer faults. Previews warn when rejected events may have left gaps.
+- The administrator guide now covers installation, telemetry settings, staff privileges, storage inspection, rollback examples, job review and maintenance. Regression coverage includes large mixed histories, delayed writes and callbacks, private moderator chat, and hazard recovery across a real save reload.
+
+### Upgrade from 1.1.0
+
+Stop the server and back up the world, audit database and `ModConfig/worldaudit.json` together. Replace the old mod in the server’s `Mods/` folder with the attached **WorldAudit-vintagestory.zip**, restart, and run `/wa status` to confirm version **1.1.1**. The ZIP includes native SQLite for Windows x64, Linux x64/ARM64 and macOS x64.
+
+The database upgrade preserves recorded transactions and adds operation links and storage visit grouping. For a filled-container break recorded before operation linking, use `a:break` or `-b` to select the block repair. Existing jobs retain their selections.
+
+### Release verification
+
+205 automated tests and 24 disposable-server checks passed on Windows with Vintage Story 1.22.7, including reopening the same save. The attached ZIP is the package used for those server checks.
+
+SHA-256 for `WorldAudit-vintagestory.zip` is `e7dc4e734f0518d15b1f005637f4fe4bf6b4bd603b8e3148b567387fdf326a68`.
+
+[Full change comparison from 1.1.0](https://github.com/UnsocialDEV/WorldAudit/compare/Release-1.1.0...Release-1.1.1) · [Administrator guide](https://github.com/UnsocialDEV/WorldAudit/blob/Release-1.1.1/README.md)
 
 ## 1.1.0 - 2026-11-03
 
