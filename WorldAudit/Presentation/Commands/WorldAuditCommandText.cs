@@ -10,7 +10,7 @@ namespace WorldAudit.Presentation.Commands;
 
 internal static class WorldAuditCommandText
 {
-    public const string HelpText =
+    public static readonly string HelpText = EscapeChatText(
         """
         [WA] /wa inspect - toggle inspect mode
         [WA] /wa lookup [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
@@ -21,7 +21,9 @@ internal static class WorldAuditCommandText
         [WA] /wa apply <jobId> (apply/resume) | /wa cancel <jobId> | /wa jobs | /wa job <jobId>
         [WA] /wa status | /wa reload | /wa consumer <pause|resume>
         [WA] /wa purge t:<age> | /wa purge confirm t:<age>
-        """;
+        """);
+
+    public static string EscapeChatText(string text) => text.Replace("<", "&lt;").Replace(">", "&gt;");
 
     public static BlockPosition GetPlayerBlockPosition(IServerPlayer player)
     {

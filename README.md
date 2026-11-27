@@ -1,6 +1,6 @@
 # WorldAudit
 
-![Version](https://img.shields.io/badge/version-1.1.1--pre.3-2f6fed)
+![Version](https://img.shields.io/badge/version-1.1.1--pre.4-2f6fed)
 ![Side](https://img.shields.io/badge/side-server-3ba55d)
 ![Framework](https://img.shields.io/badge/.NET-10.0-512bd4)
 
@@ -17,13 +17,13 @@ Useful links:
 
 ## Unreleased reliability fixes
 
-This is an unreleased `1.1.1-pre.3` build based on `1.1.0`. Dedicated-server startup retains loadable game types when optional client libraries such as `csogg` and `OpenTK.Graphics` are absent, and reports unavailable types in the server log. Required hook failures remain explicit.
+This is an unreleased `1.1.1-pre.4` build based on `1.1.0`. Dedicated-server startup retains loadable game types when optional client libraries such as `csogg` and `OpenTK.Graphics` are absent, and reports unavailable types in the server log. Required hook failures remain explicit. Command help and results escape literal angle brackets so syntax placeholders and invalid input cannot become chat markup.
 
 Invalid or incomplete filters are rejected instead of silently selecting broader history. Previews show their actual centre, radius and fixed UTC time window; container jobs include their chunks in the extent count. `/wa status` identifies the installed mod version and reports writer faults. Status and purge-preview database reads run off the game thread; long preview scans are interrupted.
 
 Block-entity restoration verifies the resulting native snapshot before reporting success. Container restoration verifies item quantities and attributes after inventory callbacks and attempts to restore the previous contents if verification fails. These checks retain existing conflict protection; they do not reconstruct inventory data that was never captured. A filled-trunk break/rollback/undo regression runs on a disposable 1.22.7 server.
 
-Validation includes 155 unit tests and 11 native server scenarios on Linux with those two client libraries absent, including startup, reload, block/container recording, inventory restoration and game ticks continuing during a locked purge preview. This is isolated validation; production installation and third-party mod compatibility remain unverified. Back up both the save and the audit database before upgrading; the legacy-history migration notes below still apply.
+Validation includes 159 unit tests and 11 native server scenarios on Linux with those two client libraries absent, including startup, reload, block/container recording, inventory restoration and game ticks continuing during a locked purge preview. Chat checks use the game's VTML parser to verify help/errors preserve following messages. This is isolated validation; production installation and third-party mod compatibility remain unverified. Back up both the save and the audit database before upgrading; the legacy-history migration notes below still apply.
 
 ## Vintage Story 1.22.7 reliability update
 
@@ -201,7 +201,7 @@ Before using the mod on a live world, review these items:
 ### Compatibility and packaging
 
 - Mod id: `worldaudit`
-- Current version: `1.1.1-pre.3` (unreleased)
+- Current version: `1.1.1-pre.4` (unreleased)
 - Side: `Server`
 - Game dependency: `1.22.7`
 - Target framework: `.NET 10`
