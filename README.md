@@ -2,14 +2,16 @@
 
 WorldAudit is a server-side moderation mod for **Vintage Story**. Use it to find who broke a block or emptied a chest, review the exact changes, and roll back the part of an incident you want to repair. Players can join with an unmodified client.
 
-**This guide covers 1.1.1-pre.4 on Vintage Story 1.22.7.** Run `/wa status` to check the installed version. The published 1.1.0 ZIP predates storage visit grouping and separate rollback pages. [Packaged releases](https://github.com/UnsocialDEV/WorldAudit/releases)
+**[Download WorldAudit 1.1.1-pre.4 for Vintage Story 1.22.7 (mod ZIP)](https://github.com/UnsocialDEV/WorldAudit/releases/download/Release-1.1.1-pre.4/WorldAudit-vintagestory.zip)**
+
+This guide covers the prerelease. Run `/wa status` to check the installed version. [Prerelease notes](https://github.com/UnsocialDEV/WorldAudit/releases/tag/Release-1.1.1-pre.4) · [All releases](https://github.com/UnsocialDEV/WorldAudit/releases)
 
 [Install and configure](#install-and-configure) · [Inspect a chest](#inspect-a-chest-or-block) · [Search an area](#search-an-area) · [Review and apply a rollback](#review-and-apply-a-rollback) · [Grant staff access](#grant-staff-access) · [Maintain the audit history](#maintain-the-audit-history)
 
 ## Install and configure
 
 1. Stop the server cleanly. For an upgrade, back up the world save, the WorldAudit database directory and `ModConfig/worldaudit.json` together.
-2. Place one packaged `WorldAudit-vintagestory.zip` in the server data folder’s `Mods/` directory, replacing the older copy. Leave the ZIP intact. GitHub’s automatic *Source code* archives require building first.
+2. Download [WorldAudit-vintagestory.zip](https://github.com/UnsocialDEV/WorldAudit/releases/download/Release-1.1.1-pre.4/WorldAudit-vintagestory.zip) and place it in the server data folder’s `Mods/` directory, replacing the older copy. Leave the ZIP intact. GitHub’s automatic *Source code* archives require building first.
 3. Choose your telemetry settings **before the first start**. By default, WorldAudit sends startup and error reports to a preconfigured Discord webhook and includes online player names. To keep reporting local, create `ModConfig/worldaudit.json` with the following contents, or set the same property in your existing config.
 
    ```json
