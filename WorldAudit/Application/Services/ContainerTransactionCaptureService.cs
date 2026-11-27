@@ -48,7 +48,9 @@ public sealed class ContainerTransactionCaptureService : IContainerTransactionCa
             AfterSnapshot: context.AfterSnapshot,
             Lines: lines,
             Flags: context.Flags,
-            SourceJobId: context.SourceJobId);
+            SourceJobId: context.SourceJobId,
+            OperationId: context.OperationId,
+            VisitId: context.VisitId);
 
         _auditWriter.QueueContainerTransaction(transaction);
     }

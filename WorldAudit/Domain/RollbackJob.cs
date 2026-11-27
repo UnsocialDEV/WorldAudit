@@ -21,4 +21,5 @@ public sealed record RollbackJob(
     int FailedBlockCount,
     int FailedContainerCount,
     DateTimeOffset? OldestTargetOccurredAt,
-    string? LastError);
+    string? LastError,
+    int PlannedVisitCount = 0);

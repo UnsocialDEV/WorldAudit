@@ -22,6 +22,10 @@ public interface IAuditRepository
         ContainerRollbackSelectionQuery query,
         CancellationToken cancellationToken = default);
 
+    Task<RollbackJob> FreezeRollbackPreviewAsync(Services.RollbackPreviewSelection selection, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<RollbackPlanEntry>> GetRollbackPlanBatchAsync(long jobId, int limit, CancellationToken cancellationToken = default, bool validateSources = false);
+
     Task<RollbackJob> CreateRollbackJobAsync(
         RollbackJobCreateRequest request,
         IReadOnlyList<RollbackJobPlanEntryCreate> entries,

@@ -11,6 +11,33 @@ namespace WorldAudit.Tests;
 
 public sealed class VintageStoryRollbackContainerApplierTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OccupiedSlotWithoutBytesFailsBeforeAnyMutation(bool corruptExpected)
+    {
+        using var fixture = new ContainerTestFixture();
+        fixture.Inventory[1].Itemstack = fixture.Stack("game:stone", 3);
+        var before = Snapshot(fixture.Inventory);
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        writer.Write(fixture.Inventory.Count);
+        for (int slot = 0; slot < fixture.Inventory.Count; slot++)
+        {
+            writer.Write(slot);
+            writer.Write(slot == 0 ? "game:torch" : "");
+            writer.Write(slot == 0 ? 5 : 0);
+            writer.Write(0);
+        }
+        var incomplete = stream.ToArray();
+        var entry = corruptExpected ? Entry(fixture, incomplete, before) : Entry(fixture, before, incomplete);
+        var result = await new VintageStoryRollbackContainerApplier(fixture.Api).ApplyAsync(entry);
+        Assert.Equal(RollbackContainerApplyStatus.Failed, result.Status);
+        Assert.Contains("slot 0", result.ErrorText);
+        Assert.False(result.ChangedWorld);
+        Assert.Equal(before, Snapshot(fixture.Inventory));
+    }
+
     [Fact]
     public async Task ApplyAsync_CallbackChangesRestoredStack_ReportsFailureAndRestoresPreviousContents()
     {

@@ -39,6 +39,8 @@ public sealed class ContainerAuditQueryService
         LookupFilters filters,
         CancellationToken cancellationToken = default)
     {
+        if (filters.Action.HasValue)
+            return Task.FromResult<IReadOnlyList<ContainerAuditTransaction>>(Array.Empty<ContainerAuditTransaction>());
         var query = new ContainerLookupQuery(
             worldId,
             center,

@@ -9,6 +9,7 @@ namespace WorldAudit.Presentation.Commands;
 
 public sealed class WorldAuditChatCommands
 {
+    private readonly WorldAuditCommandContext _context;
     private readonly WorldAuditInspectCommandHandler _inspectHandler;
     private readonly WorldAuditLookupCommandHandler _lookupHandler;
     private readonly WorldAuditRollbackCommandHandler _rollbackHandler;
@@ -25,7 +26,7 @@ public sealed class WorldAuditChatCommands
         Func<string> worldIdAccessor,
         Func<(bool Success, string Message)> reloadHandler)
     {
-        var context = new WorldAuditCommandContext(
+        var context = _context = new WorldAuditCommandContext(
             api,
             runtimeAccessor,
             configAccessor,
@@ -52,12 +53,12 @@ public sealed class WorldAuditChatCommands
             .WithRootAlias("wa")
             .WithDescription("Block and container audit history commands.")
             .RequiresPrivilege(Privilege.chat)
-            .HandleWith(_ => TextCommandResult.Success(WorldAuditCommandText.HelpText, null));
+            .HandleWith(args => _context.ExecuteSafely(args, "help", () => TextCommandResult.Success(WorldAuditCommandText.HelpText, null)));
 
         root.BeginSubCommand("help")
             .WithDescription("Show WorldAudit help.")
             .RequiresPrivilege(Privilege.chat)
-            .HandleWith(_ => TextCommandResult.Success(WorldAuditCommandText.HelpText, null))
+            .HandleWith(args => _context.ExecuteSafely(args, "help", () => TextCommandResult.Success(WorldAuditCommandText.HelpText, null)))
             .EndSubCommand();
 
         root.BeginSubCommand("inspect")
@@ -66,6 +67,13 @@ public sealed class WorldAuditChatCommands
             .RequiresPlayer()
             .RequiresPrivilege(WorldAuditPrivileges.Inspect)
             .HandleWith(_inspectHandler.HandleInspect)
+            .BeginSubCommand("details")
+                .WithDescription("Read the transactions behind a storage inspection entry.")
+                .RequiresPlayer()
+                .RequiresPrivilege(WorldAuditPrivileges.Inspect)
+                .WithArgs([Api.ChatCommands.Parsers.OptionalAll("id [page]")])
+                .HandleWith(new ContainerInspectDetailsCommand(_context).Handle)
+                .EndSubCommand()
             .EndSubCommand();
 
         root.BeginSubCommand("lookup")
@@ -135,10 +143,10 @@ public sealed class WorldAuditChatCommands
             .EndSubCommand();
 
         root.BeginSubCommand("job")
-            .WithDescription("Show one rollback job.")
+            .WithDescription("Show a job summary or browse its block edits, storage visits, and transactions.")
             .RequiresPlayer()
             .RequiresPrivilege(WorldAuditPrivileges.Rollback)
-            .WithArgs([Api.ChatCommands.Parsers.OptionalAll("jobId")])
+            .WithArgs([Api.ChatCommands.Parsers.OptionalAll("jobId [blocks|storage [details id]] [page]")])
             .HandleWith(_rollbackHandler.HandleJob)
             .EndSubCommand();
 

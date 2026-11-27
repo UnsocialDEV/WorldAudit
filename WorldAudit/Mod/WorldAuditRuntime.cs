@@ -22,12 +22,14 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
     private readonly TimeSpan _optimizeInterval;
     private readonly long _walSizeThresholdBytes;
     private readonly string _walPath;
+    private DateTimeOffset _retryMaintenanceAtUtc;
     private DateTimeOffset _nextCheckpointAtUtc;
     private DateTimeOffset _nextOptimizeAtUtc;
 
     private WorldAuditRuntime(
         WorldAuditOptions options,
         SqliteSchemaMigrator schemaMigrator,
+        SqliteConnectionFactory connectionFactory,
         IAuditRepository repository,
         IAuditMaintenanceService maintenanceService,
         ChannelAuditWriter auditWriter,
@@ -45,6 +47,10 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
     {
         Options = options;
         SchemaMigrator = schemaMigrator;
+        ContainerInspectHistory = new(connectionFactory);
+        ContainerInspectDetails = new(connectionFactory);
+        JobBlockPage = new(connectionFactory);
+        JobVisitDetails = new(connectionFactory);
         Repository = repository;
         MaintenanceService = maintenanceService;
         AuditWriter = auditWriter;
@@ -89,6 +95,11 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
 
     public IContainerTransactionCapture ContainerCapture { get; }
 
+    internal SqliteContainerInspectHistory ContainerInspectHistory { get; }
+    internal SqliteContainerInspectDetails ContainerInspectDetails { get; }
+    internal SqliteJobBlockPage JobBlockPage { get; }
+    internal SqliteJobVisitDetails JobVisitDetails { get; }
+
     public ContainerAuditQueryService ContainerQueries { get; }
 
     public RollbackPlanner RollbackPlanner { get; }
@@ -130,7 +141,7 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
         var blockQueries = new BlockAuditQueryService(repository, options);
         var containerCapture = new ContainerTransactionCaptureService(auditWriter, mutationGuard);
         var containerQueries = new ContainerAuditQueryService(repository, options);
-        var rollbackPlanner = new RollbackPlanner(repository, options);
+        var rollbackPlanner = new RollbackPlanner(repository, options, auditWriter);
         var rollbackCoordinator = new RollbackExecutionCoordinator(
             repository,
             auditWriter,
@@ -143,6 +154,7 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
         return new WorldAuditRuntime(
             options,
             migrator,
+            connectionFactory,
             repository,
             maintenanceService,
             auditWriter,
@@ -176,11 +188,20 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
 
     public async Task<AuditStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
     {
-        var storageSnapshot = await _maintenanceService.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        SqliteMaintenanceSnapshot? storage = null;
+        string? storageError = null;
+        try
+        {
+            storage = await _maintenanceService.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is Microsoft.Data.Sqlite.SqliteException or IOException or UnauthorizedAccessException)
+        {
+            storageError = error.Message;
+        }
         return new AuditStatusSnapshot(
             DatabasePath: Options.DatabasePath,
-            SqliteVersion: storageSnapshot.SqliteVersion,
-            WalSizeBytes: storageSnapshot.WalSizeBytes,
+            SqliteVersion: storage?.SqliteVersion ?? "unavailable",
+            WalSizeBytes: storage?.WalSizeBytes ?? 0,
             IsConsumerPaused: IsConsumerPaused,
             WriterSnapshot: _auditWriter.Snapshot(),
             ActiveRollbackJobCount: RollbackCoordinator.GetActiveJobCount(),
@@ -190,7 +211,10 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
             CheckpointPolicy: new AuditCheckpointPolicySnapshot(_checkpointInterval, _walSizeThresholdBytes, _optimizeInterval),
             LastCheckpoint: _diagnostics.SnapshotCheckpoint(),
             LastOptimize: _diagnostics.SnapshotOptimize(),
-            IsWalThresholdExceeded: storageSnapshot.WalSizeBytes >= _walSizeThresholdBytes);
+            IsWalThresholdExceeded: storage?.WalSizeBytes >= _walSizeThresholdBytes)
+        {
+            StorageError = storageError
+        };
     }
 
     public Task<PurgePreview> PreviewPurgeAsync(TimeSpan age, DateTimeOffset? now = null, CancellationToken cancellationToken = default)
@@ -200,6 +224,8 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
 
     public async Task<PurgeResult> ExecutePurgeAsync(TimeSpan age, DateTimeOffset? now = null, CancellationToken cancellationToken = default)
     {
+        await RollbackPlanner.HistoryAccess.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var access = new HistoryAccessLease(RollbackPlanner.HistoryAccess);
         var startedAt = now ?? DateTimeOffset.UtcNow;
         var cutoff = ToCutoff(age, now);
 
@@ -234,6 +260,13 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var effectiveNow = now ?? DateTimeOffset.UtcNow;
+        if (!RollbackPlanner.HistoryAccess.Wait(0))
+            return _maintenanceService.LastRun ?? new MaintenanceRunStatus(effectiveNow, effectiveNow, true,
+                Options.RetentionDays, null, "Maintenance deferred during an audit operation.");
+        using var access = new HistoryAccessLease(RollbackPlanner.HistoryAccess);
+        if (!force && effectiveNow < _retryMaintenanceAtUtc)
+            return _maintenanceService.LastRun ?? new MaintenanceRunStatus(effectiveNow, effectiveNow, false,
+                Options.RetentionDays, null, "Waiting for the next maintenance check.");
         var walSizeBytes = GetWalSizeBytes();
         var checkpointDueByTime = effectiveNow >= _nextCheckpointAtUtc;
         var checkpointDueByWal = walSizeBytes >= _walSizeThresholdBytes;
@@ -252,6 +285,7 @@ public sealed class WorldAuditRuntime : IAsyncDisposable
                     "Maintenance not due.");
         }
 
+        _retryMaintenanceAtUtc = effectiveNow.AddSeconds(5);
         if (await _maintenanceService.GetBlockingRollbackJobCountAsync(cancellationToken).ConfigureAwait(false) > 0)
         {
             var skipped = new MaintenanceRunStatus(

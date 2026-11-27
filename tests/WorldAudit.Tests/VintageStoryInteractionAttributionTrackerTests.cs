@@ -6,6 +6,28 @@ namespace WorldAudit.Tests;
 public sealed class VintageStoryInteractionAttributionTrackerTests
 {
     [Fact]
+    public async Task ExpiredSnapshotsAtOneOffLocationsAreCollectedWithoutMoreInteractions()
+    {
+        var tracker = new VintageStoryInteractionAttributionTracker(ttl: TimeSpan.FromMilliseconds(80));
+        var snapshots = Enumerable.Range(0, 128).Select(RecordSnapshot).ToArray();
+        var timeout = System.Diagnostics.Stopwatch.StartNew();
+        while (snapshots.Any(snapshot => snapshot.IsAlive) && timeout.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            await Task.Delay(40);
+            GC.Collect();
+        }
+        Assert.All(snapshots, snapshot => Assert.False(snapshot.IsAlive));
+        GC.KeepAlive(tracker);
+
+        WeakReference RecordSnapshot(int x)
+        {
+            var snapshot = new byte[1024];
+            tracker.Record("save", new BlockPos(x, 65, 4, 0), "Player", "uid", snapshot);
+            return new WeakReference(snapshot);
+        }
+    }
+
+    [Fact]
     public void TryResolve_PrefersLatestStrongCandidate()
     {
         var now = DateTimeOffset.UtcNow;

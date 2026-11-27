@@ -15,7 +15,9 @@ public sealed record ContainerTransactionCaptureContext(
     byte[]? BeforeSnapshot = null,
     byte[]? AfterSnapshot = null,
     int Flags = 0,
-    long? SourceJobId = null);
+    long? SourceJobId = null,
+    string? OperationId = null,
+    string? VisitId = null);
 
 public sealed record ContainerTransactionLineCapture(
     string ItemCode,

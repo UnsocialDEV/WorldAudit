@@ -45,6 +45,7 @@ New-Item -ItemType Directory -Path $modConfig, $testMods -Force | Out-Null
     EnableWorldgenCauseProvider = $false
     DatabasePath = (Join-Path $data 'WorldAudit/live-audit.db')
     VerboseDiagnostics = $true
+    RollbackPreviewLimit = 32
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $modConfig 'worldaudit.json') -Encoding utf8
 Copy-Item -LiteralPath $package -Destination (Join-Path $data 'Mods/WorldAudit.zip')
 Copy-Item -LiteralPath $driver -Destination $testMods
@@ -58,36 +59,42 @@ $info.RedirectStandardInput = $true
 $info.RedirectStandardOutput = $true
 $info.RedirectStandardError = $true
 foreach ($argument in @('--dataPath', $data, '--ip', '127.0.0.1', '--port', "$Port", '--reducedthreads')) { $info.ArgumentList.Add($argument) }
-$process = [Diagnostics.Process]::Start($info)
-$consoleOutput = $process.StandardOutput.ReadToEndAsync()
-$consoleErrors = $process.StandardError.ReadToEndAsync()
-$mainLog = Join-Path $data 'Logs/server-main.log'
-$reportPath = Join-Path $data 'worldaudit-server-tests.json'
-$deadline = [DateTime]::UtcNow.AddMinutes(5)
-try {
-    do {
-        if ($process.HasExited) { throw "Server exited with code $($process.ExitCode); see $mainLog" }
-        if ([DateTime]::UtcNow -gt $deadline) { throw "Startup timed out; see $mainLog" }
-        Start-Sleep -Milliseconds 500
-    } until ((Test-Path -LiteralPath $mainLog) -and ((Get-Content -LiteralPath $mainLog -Raw) -match 'Entering runphase RunGame'))
-    $process.StandardInput.WriteLine('/watest')
-    do {
-        if ($process.HasExited) { throw "Server exited during tests; see $mainLog" }
-        if ([DateTime]::UtcNow -gt $deadline) { throw "Tests timed out; see $mainLog" }
-        Start-Sleep -Milliseconds 500
-    } until (Test-Path -LiteralPath $reportPath)
-} finally {
-    if (!$process.HasExited) {
-        $process.StandardInput.WriteLine('/stop')
-        if (!$process.WaitForExit(60000)) { $process.Kill(); throw "Disposable server did not stop cleanly; see $mainLog" }
+function Invoke-ServerTestPhase($phase, $mainLog, $reportPath) {
+    $process = [Diagnostics.Process]::Start($info)
+    $consoleOutput = $process.StandardOutput.ReadToEndAsync()
+    $consoleErrors = $process.StandardError.ReadToEndAsync()
+    $deadline = [DateTime]::UtcNow.AddMinutes(5)
+    try {
+        do {
+            if ($process.HasExited) { throw "Server exited with code $($process.ExitCode); see $mainLog" }
+            if ([DateTime]::UtcNow -gt $deadline) { throw "Startup timed out; see $mainLog" }
+            Start-Sleep -Milliseconds 500
+        } until ((Test-Path -LiteralPath $mainLog) -and ((Get-Content -LiteralPath $mainLog -Raw) -match 'Entering runphase RunGame'))
+        $process.StandardInput.WriteLine('/watest')
+        do {
+            if ($process.HasExited) { throw "Server exited during tests; see $mainLog" }
+            if ([DateTime]::UtcNow -gt $deadline) { throw "Tests timed out; see $mainLog" }
+            Start-Sleep -Milliseconds 500
+        } until (Test-Path -LiteralPath $reportPath)
+    } finally {
+        if (!$process.HasExited) {
+            $process.StandardInput.WriteLine('/stop')
+            if (!$process.WaitForExit(60000)) { $process.Kill(); throw "Disposable server did not stop cleanly; see $mainLog" }
+        }
+        [IO.File]::WriteAllText((Join-Path $run "$phase-console.log"), $consoleOutput.GetAwaiter().GetResult())
+        [IO.File]::WriteAllText((Join-Path $run "$phase-stderr.log"), $consoleErrors.GetAwaiter().GetResult())
+        $process.Dispose()
     }
-    [IO.File]::WriteAllText((Join-Path $run 'console.log'), $consoleOutput.GetAwaiter().GetResult())
-    [IO.File]::WriteAllText((Join-Path $run 'stderr.log'), $consoleErrors.GetAwaiter().GetResult())
-    $process.Dispose()
+    $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+    $report.results | Format-Table name, passed -AutoSize
+    Write-Output "Report: $reportPath"
+    if ($report.game -ne '1.22.7') { throw "Unexpected game version $($report.game)" }
+    if (@($report.results | Where-Object { !$_.passed }).Count -gt 0) { throw 'Live server tests failed.' }
+    if ((Get-Content -LiteralPath $mainLog -Raw) -match '\[Error\]|\[Fatal\]') { throw "Server logged errors; see $mainLog" }
 }
-$report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-$report.results | Format-Table name, passed -AutoSize
-Write-Output "Report: $reportPath"
-if ($report.game -ne '1.22.7') { throw "Unexpected game version $($report.game)" }
-if (@($report.results | Where-Object { !$_.passed }).Count -gt 0) { throw 'Live server tests failed.' }
-if ((Get-Content -LiteralPath $mainLog -Raw) -match '\[Error\]|\[Fatal\]') { throw "Server logged errors; see $mainLog" }
+
+Invoke-ServerTestPhase 'initial' (Join-Path $data 'Logs/server-main.log') (Join-Path $data 'worldaudit-server-tests.json')
+$reloadLogs = Join-Path $data 'ReloadLogs'
+$info.ArgumentList.Add('--logPath')
+$info.ArgumentList.Add($reloadLogs)
+Invoke-ServerTestPhase 'reload' (Join-Path $reloadLogs 'server-main.log') (Join-Path $data 'worldaudit-server-tests.reload.json')

@@ -16,12 +16,11 @@ public sealed class VintageStoryContainerEventBridge
     private readonly Func<bool> _containerAuditEnabled;
     private readonly Func<string> _worldIdAccessor;
     private readonly System.Func<string, bool> _isInspectEnabled;
-    private readonly VintageStoryInteractionAttributionTracker _interactionTracker;
     internal static VintageStoryContainerEventBridge? Current { get; private set; }
     private readonly BlockMutationScopeManager _scopes;
     private readonly Dictionary<string, Subscription> _trackedInventorySubscriptions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, InventoryTrackingState> _inventoryStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<ContainerSessionKey, ContainerSessionState> _sessions = new();
+    private readonly ConcurrentDictionary<ContainerSessionKey, ContainerVisit> _sessions = new();
 
     public VintageStoryContainerEventBridge(
         ICoreServerAPI api,
@@ -37,7 +36,6 @@ public sealed class VintageStoryContainerEventBridge
         _containerAuditEnabled = containerAuditEnabled;
         _worldIdAccessor = worldIdAccessor;
         _isInspectEnabled = isInspectEnabled;
-        _interactionTracker = interactionTracker;
         _scopes = scopes ?? new BlockMutationScopeManager();
     }
 
@@ -79,7 +77,7 @@ public sealed class VintageStoryContainerEventBridge
             }
 
             var metadata = CaptureInventoryMetadata(container, inventory, blockSel.Position.Copy());
-            RecordInteraction(byPlayer, metadata.Position);
+
             EnsureInventoryTracked(inventory, metadata);
 
         }
@@ -102,7 +100,7 @@ public sealed class VintageStoryContainerEventBridge
             {
                 if (_sessions.TryRemove(session, out var state))
                 {
-                    PersistSession(state);
+                    PersistInventoryDelta(state.Inventory);
                 }
             }
         }
@@ -139,13 +137,24 @@ public sealed class VintageStoryContainerEventBridge
 
     internal void TrackAt(BlockPos position)
     {
-        if (_api.World.BlockAccessor.GetBlockEntity(position) is IBlockEntityContainer container && container.Inventory is InventoryBase inventory)
+        if (_containerAuditEnabled() && _api.World.BlockAccessor.GetBlockEntity(position) is IBlockEntityContainer container && container.Inventory is InventoryBase inventory)
             EnsureInventoryTracked(inventory, CaptureInventoryMetadata(container, inventory, position.Copy()));
     }
 
     internal void TrackInventory(InventoryBase inventory)
     {
-        if (inventory.Pos is not null) EnsureInventoryTracked(inventory);
+        if (_containerAuditEnabled() && inventory.Pos is not null) EnsureInventoryTracked(inventory);
+    }
+
+    internal void InventoryDeserialized(InventoryBase inventory)
+    {
+        if (!_containerAuditEnabled() || inventory.Pos is null) return;
+        var metadata = CaptureInventoryMetadata(null, inventory, inventory.Pos.Copy());
+        if (_trackedInventorySubscriptions.TryGetValue(metadata.InventoryId, out var existing)
+            && ReferenceEquals(existing.Inventory, inventory))
+            _inventoryStates[metadata.InventoryId] = CreateTrackingState(metadata, inventory);
+        else
+            EnsureInventoryTracked(inventory, metadata);
     }
 
     internal void UntrackInventory(InventoryBase inventory)
@@ -171,7 +180,6 @@ public sealed class VintageStoryContainerEventBridge
                 return;
             }
 
-            RecordInteraction(player, inventory.Pos?.Copy());
             EnsureSessionForPlayer(inventory, player, inventory.Pos?.Copy());
         }
         catch (Exception exception)
@@ -193,7 +201,7 @@ public sealed class VintageStoryContainerEventBridge
             var key = new ContainerSessionKey(inventoryId, player.PlayerUID);
             if (_sessions.TryRemove(key, out var state))
             {
-                PersistSession(state);
+                PersistInventoryDelta(state.Inventory);
             }
         }
         catch (Exception exception)
@@ -211,7 +219,7 @@ public sealed class VintageStoryContainerEventBridge
                 return;
             }
 
-            PersistInventoryDelta(inventory);
+            PersistInventoryDelta(inventory, slotId);
         }
         catch (Exception exception)
         {
@@ -229,62 +237,12 @@ public sealed class VintageStoryContainerEventBridge
 
         EnsureInventoryTracked(inventory, CaptureInventoryMetadata(null, inventory, position));
         var key = new ContainerSessionKey(inventoryId, player.PlayerUID);
-        var snapshots = CaptureSlots(inventory);
-        var metadata = CaptureInventoryMetadata(null, inventory, position);
-        var state = new ContainerSessionState(
-            Inventory: inventory,
-            InventoryId: inventoryId,
-            WorldId: metadata.WorldId,
-            Position: metadata.Position,
-            InventoryType: metadata.InventoryType,
-            ContainerLabel: metadata.ContainerLabel,
-            ActorName: player.PlayerName,
-            ActorExternalId: player.PlayerUID,
-            BeforeSlots: snapshots,
-            BeforeSnapshot: SerializeInventorySnapshot(snapshots),
-            WasAmbiguous: CountSessionsForInventory(inventoryId) > 0);
-
-        _sessions.AddOrUpdate(key, state, (_, existing) => existing with
-        {
-            Position = existing.Position ?? state.Position,
-            InventoryType = existing.InventoryType,
-            ContainerLabel = existing.ContainerLabel ?? state.ContainerLabel,
-            WasAmbiguous = existing.WasAmbiguous || state.WasAmbiguous
-        });
+        _sessions.GetOrAdd(key, _ => new ContainerVisit(inventory, Guid.NewGuid().ToString("N")));
     }
 
-    private void PersistSession(ContainerSessionState state)
+    private void PersistInventoryDelta(InventoryBase inventory, int? modifiedSlot = null)
     {
-        var position = state.Position;
-        if (!_containerAuditEnabled() || position is null)
-        {
-            return;
-        }
-
-        var afterSlots = CaptureSlots(state.Inventory);
-        var lines = BuildLines(state.BeforeSlots, afterSlots);
-        if (lines.Count == 0)
-        {
-            return;
-        }
-
-        PersistTransaction(
-            state.InventoryId,
-            state.WorldId,
-            position,
-            state.InventoryType,
-            state.ContainerLabel,
-            state.BeforeSlots,
-            state.BeforeSnapshot,
-            afterSlots,
-            lines,
-            state.ActorName,
-            state.ActorExternalId,
-            state.WasAmbiguous);
-    }
-
-    private void PersistInventoryDelta(InventoryBase inventory)
-    {
+        if (!_containerAuditEnabled()) return;
         var inventoryId = ResolveInventoryId(inventory, inventory.Pos?.Copy());
         if (!_inventoryStates.TryGetValue(inventoryId, out var state))
         {
@@ -292,82 +250,36 @@ public sealed class VintageStoryContainerEventBridge
             _inventoryStates[inventoryId] = state;
         }
 
-        var afterSlots = CaptureSlots(inventory);
-        var lines = BuildLines(state.LastSlots, afterSlots);
-        if (lines.Count == 0)
+        IReadOnlyList<SlotSnapshot> afterSlots;
+        IReadOnlyList<ContainerTransactionLineCapture> lines;
+        if (modifiedSlot is int id && id >= 0 && id < inventory.Count && inventory.Count == state.LastSlots.Count)
         {
-            return;
+            var after = CaptureSlot(inventory, id);
+            var before = state.LastSlots[id];
+            if (SnapshotsEqual(before, after)) return;
+            var updated = state.LastSlots.ToArray();
+            updated[id] = after;
+            afterSlots = updated;
+            lines = BuildLines([before], [after]);
         }
-
-        if (state.Position is null)
+        else
         {
-            _inventoryStates[inventoryId] = state with
-            {
-                LastSlots = afterSlots,
-                LastSnapshot = SerializeInventorySnapshot(afterSlots)
-            };
-            return;
+            afterSlots = CaptureSlots(inventory);
+            lines = BuildLines(state.LastSlots, afterSlots);
         }
-
-        PersistTransaction(
-            inventoryId,
-            state.WorldId,
-            state.Position,
-            state.InventoryType,
-            state.ContainerLabel,
-            state.LastSlots,
-            state.LastSnapshot,
-            afterSlots,
-            lines,
-            null,
-            null,
-            false);
-
-        var afterSnapshot = SerializeInventorySnapshot(afterSlots);
-        _inventoryStates[inventoryId] = state with
-        {
-            LastSlots = afterSlots,
-            LastSnapshot = afterSnapshot
-        };
-
-        foreach (var entry in _sessions.Where(pair => string.Equals(pair.Key.InventoryId, inventoryId, StringComparison.OrdinalIgnoreCase)).ToArray())
-        {
-            _sessions[entry.Key] = entry.Value with
-            {
-                BeforeSlots = afterSlots,
-                BeforeSnapshot = afterSnapshot,
-                WasAmbiguous = entry.Value.WasAmbiguous || CountSessionsForInventory(inventoryId) > 1
-            };
-        }
-    }
-
-    private void PersistTransaction(
-        string inventoryId,
-        string worldId,
-        BlockPos position,
-        string inventoryType,
-        string? containerLabel,
-        IReadOnlyList<SlotSnapshot> beforeSlots,
-        byte[] beforeSnapshot,
-        IReadOnlyList<SlotSnapshot> afterSlots,
-        IReadOnlyList<ContainerTransactionLineCapture> lines,
-        string? fallbackActorName,
-        string? fallbackActorExternalId,
-        bool fallbackIsAmbiguous)
-    {
-        var attribution = ResolveAttribution(worldId, position, inventoryId, fallbackActorName, fallbackActorExternalId, fallbackIsAmbiguous);
-        _capture.Capture(new ContainerTransactionCaptureContext(
-            WorldId: worldId,
-            Position: new BlockPosition(position.X, position.InternalY, position.Z),
-            OccurredAt: DateTimeOffset.UtcNow,
-            ActorName: attribution.ActorName,
-            ActorExternalId: attribution.ActorExternalId,
-            Cause: attribution.Cause,
-            InventoryType: inventoryType,
-            ContainerLabel: containerLabel,
-            Lines: lines,
-            BeforeSnapshot: beforeSnapshot,
-            AfterSnapshot: SerializeInventorySnapshot(afterSlots)));
+        if (lines.Count == 0) return;
+        var snapshot = SerializeInventorySnapshot(afterSlots);
+        _inventoryStates[inventoryId] = state with { LastSlots = afterSlots, LastSnapshot = snapshot };
+        if (state.Position is not { } pos) return;
+        // A closing inventory can expose older edits which did not raise SlotModified.
+        var scope = modifiedSlot.HasValue ? _scopes.GetAmbientScope() : null;
+        var actor = scope is { IsTrusted: true } ? scope : BlockMutationScope.Synthetic(AuditCause.Unknown);
+        var visitId = actor.Cause == AuditCause.Player && actor.ActorExternalId is { } uid &&
+            _sessions.TryGetValue(new ContainerSessionKey(inventoryId, uid), out var visit) ? visit.Id : null;
+        _capture.Capture(new ContainerTransactionCaptureContext(state.WorldId,
+            new BlockPosition(pos.X, pos.InternalY, pos.Z), DateTimeOffset.UtcNow, actor.ActorName, actor.ActorExternalId,
+            actor.Cause, state.InventoryType, state.ContainerLabel, lines, state.LastSnapshot, snapshot,
+            OperationId: modifiedSlot.HasValue ? VintageStoryGameHooks.ContainerOperationId : null, VisitId: visitId));
     }
 
     private string? ResolveContainerLabel(BlockPos? position)
@@ -396,7 +308,7 @@ public sealed class VintageStoryContainerEventBridge
             ResolveContainerLabel(position));
     }
 
-    private static InventoryTrackingState CreateTrackingState(InventoryMetadata metadata, InventoryBase inventory)
+    private InventoryTrackingState CreateTrackingState(InventoryMetadata metadata, InventoryBase inventory)
     {
         var slots = CaptureSlots(inventory);
         return new InventoryTrackingState(
@@ -455,30 +367,6 @@ public sealed class VintageStoryContainerEventBridge
         return inventory.ClassName ?? inventory.GetType().FullName ?? "inventory";
     }
 
-    private void RecordInteraction(IPlayer player, BlockPos? position)
-    {
-        if (position is null || player?.PlayerUID is null)
-        {
-            return;
-        }
-
-        _interactionTracker.Record(_worldIdAccessor(), position, player.PlayerName, player.PlayerUID);
-    }
-
-    private Attribution ResolveAttribution(
-        string worldId,
-        BlockPos position,
-        string inventoryId,
-        string? fallbackActorName,
-        string? fallbackActorExternalId,
-        bool fallbackIsAmbiguous)
-    {
-        var scope = _scopes.GetAmbientScope();
-        return scope is { IsTrusted: true }
-            ? new Attribution(scope.ActorName, scope.ActorExternalId, scope.Cause)
-            : new Attribution("#unknown", null, AuditCause.Unknown);
-    }
-
     private static IReadOnlyList<ContainerTransactionLineCapture> BuildLines(
         IReadOnlyList<SlotSnapshot> beforeSlots,
         IReadOnlyList<SlotSnapshot> afterSlots)
@@ -498,8 +386,8 @@ public sealed class VintageStoryContainerEventBridge
 
             if (before.ItemCode is not null && after.ItemCode is not null && before.ItemCode != after.ItemCode)
             {
-                lines.Add(new ContainerTransactionLineCapture(before.ItemCode, slotId, -before.Quantity, before.Quantity, 0, before.StackBytes, null));
-                lines.Add(new ContainerTransactionLineCapture(after.ItemCode, slotId, after.Quantity, 0, after.Quantity, null, after.StackBytes));
+                lines.Add(new ContainerTransactionLineCapture(before.ItemCode, before.SlotId, -before.Quantity, before.Quantity, 0, before.StackBytes, null));
+                lines.Add(new ContainerTransactionLineCapture(after.ItemCode, after.SlotId, after.Quantity, 0, after.Quantity, null, after.StackBytes));
                 continue;
             }
 
@@ -511,7 +399,7 @@ public sealed class VintageStoryContainerEventBridge
 
             lines.Add(new ContainerTransactionLineCapture(
                 ItemCode: itemCode,
-                SlotId: slotId,
+                SlotId: after.SlotId,
                 QuantityDelta: after.Quantity - before.Quantity,
                 BeforeQuantity: before.Quantity,
                 AfterQuantity: after.Quantity,
@@ -533,24 +421,24 @@ public sealed class VintageStoryContainerEventBridge
         return StructuralComparisons.StructuralEqualityComparer.Equals(before.StackBytes, after.StackBytes);
     }
 
-    private static IReadOnlyList<SlotSnapshot> CaptureSlots(InventoryBase inventory)
+    private IReadOnlyList<SlotSnapshot> CaptureSlots(InventoryBase inventory)
     {
         var snapshots = new List<SlotSnapshot>(inventory.Count);
         for (var slotId = 0; slotId < inventory.Count; slotId++)
         {
-            var slot = inventory[slotId];
-            var stack = slot?.Itemstack;
-            snapshots.Add(new SlotSnapshot(
-                SlotId: slotId,
-                ItemCode: stack?.Collectible?.Code?.ToString(),
-                Quantity: stack?.StackSize ?? 0,
-                StackBytes: TrySerializeStack(stack)));
+            snapshots.Add(CaptureSlot(inventory, slotId));
         }
-
         return snapshots;
     }
 
-    private static byte[]? TrySerializeStack(ItemStack? stack)
+    private SlotSnapshot CaptureSlot(InventoryBase inventory, int slotId)
+    {
+        var stack = inventory[slotId]?.Itemstack;
+        return new SlotSnapshot(slotId, stack?.Collectible?.Code?.ToString(), stack?.StackSize ?? 0,
+            TrySerializeStack(stack, inventory, slotId));
+    }
+
+    private byte[]? TrySerializeStack(ItemStack? stack, InventoryBase inventory, int slotId)
     {
         if (stack is null)
         {
@@ -561,8 +449,10 @@ public sealed class VintageStoryContainerEventBridge
         {
             return stack.ToBytes();
         }
-        catch
+        catch (Exception exception)
         {
+            _api.Logger.Error("[WorldAudit] Cannot serialize inventory {0}, slot {1} ({2}). Rollback for this snapshot is unavailable: {3}",
+                inventory.InventoryID, slotId, stack.Collectible?.Code, exception);
             return null;
         }
     }
@@ -588,30 +478,9 @@ public sealed class VintageStoryContainerEventBridge
         return stream.ToArray();
     }
 
-    private int CountSessionsForInventory(string? inventoryId)
-    {
-        if (string.IsNullOrWhiteSpace(inventoryId))
-        {
-            return 0;
-        }
-
-        return _sessions.Keys.Count(key => string.Equals(key.InventoryId, inventoryId, StringComparison.OrdinalIgnoreCase));
-    }
+    private sealed record ContainerVisit(InventoryBase Inventory, string Id);
 
     private sealed record ContainerSessionKey(string InventoryId, string PlayerUid);
-
-    private sealed record ContainerSessionState(
-        InventoryBase Inventory,
-        string InventoryId,
-        string WorldId,
-        BlockPos? Position,
-        string InventoryType,
-        string? ContainerLabel,
-        string ActorName,
-        string? ActorExternalId,
-        IReadOnlyList<SlotSnapshot> BeforeSlots,
-        byte[] BeforeSnapshot,
-        bool WasAmbiguous);
 
     private sealed record InventoryTrackingState(
         string InventoryId,
@@ -628,8 +497,6 @@ public sealed class VintageStoryContainerEventBridge
         BlockPos? Position,
         string InventoryType,
         string? ContainerLabel);
-
-    private sealed record Attribution(string ActorName, string? ActorExternalId, AuditCause Cause);
 
     private sealed record SlotSnapshot(int SlotId, string? ItemCode, int Quantity, byte[]? StackBytes);
 }

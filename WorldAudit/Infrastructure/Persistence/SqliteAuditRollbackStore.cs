@@ -32,38 +32,7 @@ internal sealed class SqliteAuditRollbackStore
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        var worldId = await _resolver.ResolveWorldIdAsync(connection, transaction, request.WorldId, cancellationToken).ConfigureAwait(false);
-        var requestedByActorId = await _resolver.ResolveActorIdAsync(connection, transaction, request.RequestedBy, cancellationToken).ConfigureAwait(false);
-
-        long jobId;
-        await using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText =
-                """
-                INSERT INTO rollback_jobs (
-                    world_id, requested_by_actor_id, operation_code, filter_summary, state_code, created_at_ms, planned_block_count,
-                    planned_container_count, planned_chunk_count, applied_block_count, applied_container_count, conflict_block_count,
-                    conflict_container_count, failed_block_count, failed_container_count, oldest_target_occurred_at_ms, last_error)
-                VALUES (
-                    $worldId, $requestedByActorId, $operationCode, $filterSummary, $stateCode, $createdAt, $plannedBlockCount,
-                    $plannedContainerCount, $plannedChunkCount, 0, 0, 0, 0, 0, 0, $oldestTargetOccurredAt, NULL);
-                SELECT last_insert_rowid();
-                """;
-
-            command.Parameters.AddWithValue("$worldId", worldId);
-            command.Parameters.AddWithValue("$requestedByActorId", requestedByActorId);
-            command.Parameters.AddWithValue("$operationCode", SqliteAuditValueCodec.ToCode(request.Operation));
-            command.Parameters.AddWithValue("$filterSummary", request.FilterSummary);
-            command.Parameters.AddWithValue("$stateCode", SqliteAuditValueCodec.ToCode(request.State));
-            command.Parameters.AddWithValue("$createdAt", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            command.Parameters.AddWithValue("$plannedBlockCount", request.PlannedBlockCount);
-            command.Parameters.AddWithValue("$plannedContainerCount", request.PlannedContainerCount);
-            command.Parameters.AddWithValue("$plannedChunkCount", request.PlannedChunkCount);
-            command.Parameters.AddWithValue("$oldestTargetOccurredAt", request.OldestTargetOccurredAt.HasValue ? request.OldestTargetOccurredAt.Value.ToUnixTimeMilliseconds() : DBNull.Value);
-
-            jobId = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
-        }
+        var jobId = await SqliteRollbackJobHeader.InsertAsync(connection, transaction, _resolver, request, cancellationToken).ConfigureAwait(false);
 
         for (var index = 0; index < entries.Count; index++)
         {
@@ -85,6 +54,20 @@ internal sealed class SqliteAuditRollbackStore
             await entryCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (request.PlannedContainerCount > 0)
+        {
+            using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = """
+                UPDATE rollback_jobs SET planned_visit_count = (
+                    SELECT count(DISTINCT coalesce(vm.visit_id, e.target_event_id))
+                    FROM rollback_job_entries e LEFT JOIN container_visit_members vm ON vm.transaction_id=e.target_event_id
+                    WHERE e.job_id=rollback_jobs.id AND e.target_type_code='container'
+                ) WHERE id = $job;
+                """;
+            count.Parameters.AddWithValue("$job", jobId);
+            await count.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _resolver.PublishCommittedLookups(transaction);
         return (await GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false))!;
@@ -169,10 +152,12 @@ internal sealed class SqliteAuditRollbackStore
         return await _reader.ReadContainerTransactionsAsync(connection, command, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<RollbackPlanEntry>> GetRollbackPlanEntriesAsync(long jobId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RollbackPlanEntry>> GetRollbackPlanEntriesAsync(long jobId, CancellationToken cancellationToken, int limit = -1, bool validateSources = false)
     {
-        var blockEntries = await GetRollbackBlockPlanEntriesAsync(jobId, cancellationToken).ConfigureAwait(false);
-        var containerEntries = await GetRollbackContainerPlanEntriesAsync(jobId, cancellationToken).ConfigureAwait(false);
+        if (validateSources)
+            await SqliteJobSourceValidation.CheckAsync(_state.ConnectionFactory, jobId, cancellationToken).ConfigureAwait(false);
+        var blockEntries = await GetRollbackBlockPlanEntriesAsync(jobId, cancellationToken, limit).ConfigureAwait(false);
+        var containerEntries = await GetRollbackContainerPlanEntriesAsync(jobId, cancellationToken, limit).ConfigureAwait(false);
 
         if (blockEntries.Count == 0)
         {
@@ -203,7 +188,7 @@ internal sealed class SqliteAuditRollbackStore
         return results;
     }
 
-    public async Task<IReadOnlyList<RollbackBlockPlanEntry>> GetRollbackBlockPlanEntriesAsync(long jobId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RollbackBlockPlanEntry>> GetRollbackBlockPlanEntriesAsync(long jobId, CancellationToken cancellationToken, int limit = -1)
     {
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -235,13 +220,14 @@ internal sealed class SqliteAuditRollbackStore
             INNER JOIN worlds w ON w.id = be.world_id
             LEFT JOIN blocks oldb ON oldb.id = be.old_block_id
             LEFT JOIN blocks newb ON newb.id = be.new_block_id
-            WHERE rje.job_id = $jobId
-              AND rje.target_type_code = 'block'
-              AND rje.result_code = 'planned'
+            WHERE rje.target_type_code = 'block'
+              AND rje.id IN (SELECT id FROM rollback_job_entries WHERE job_id=$jobId AND result_code='planned'
+                             ORDER BY execution_order LIMIT $limit)
             ORDER BY rje.execution_order;
             """;
         command.Parameters.AddWithValue("$jobId", jobId);
 
+        command.Parameters.AddWithValue("$limit", limit);
         var results = new List<RollbackBlockPlanEntry>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -487,7 +473,7 @@ internal sealed class SqliteAuditRollbackStore
         _resolver.PublishCommittedLookups(transaction);
     }
 
-    private async Task<IReadOnlyList<RollbackContainerPlanEntry>> GetRollbackContainerPlanEntriesAsync(long jobId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<RollbackContainerPlanEntry>> GetRollbackContainerPlanEntriesAsync(long jobId, CancellationToken cancellationToken, int limit = -1)
     {
         await using var connection = await _state.ConnectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -517,13 +503,14 @@ internal sealed class SqliteAuditRollbackStore
             INNER JOIN container_transactions ct ON ct.id = rje.target_event_id
             INNER JOIN worlds w ON w.id = ct.world_id
             INNER JOIN inventory_types it ON it.id = ct.inventory_type_id
-            WHERE rje.job_id = $jobId
-              AND rje.target_type_code = 'container'
-              AND rje.result_code = 'planned'
+            WHERE rje.target_type_code = 'container'
+              AND rje.id IN (SELECT id FROM rollback_job_entries WHERE job_id=$jobId AND result_code='planned'
+                             ORDER BY execution_order LIMIT $limit)
             ORDER BY rje.execution_order;
             """;
         command.Parameters.AddWithValue("$jobId", jobId);
 
+        command.Parameters.AddWithValue("$limit", limit);
         var results = new List<RollbackContainerPlanEntry>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

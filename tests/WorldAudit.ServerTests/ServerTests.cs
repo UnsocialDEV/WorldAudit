@@ -18,7 +18,7 @@ using WorldAudit.Mod;
 namespace WorldAudit.ServerTests;
 
 // Deliberately a separate mod: never install this destructive fixture driver on a real world.
-public sealed class ServerTests : ModSystem
+public sealed partial class ServerTests : ModSystem
 {
     private ICoreServerAPI api = null!;
     private ServerMain server = null!;
@@ -54,13 +54,22 @@ public sealed class ServerTests : ModSystem
 
     private async void Run()
     {
+        var checkingReload = File.Exists(ReportPath);
         try
         {
+            if (checkingReload)
+            {
+                Check("rebuilt pile and bomb survive save reload", VerifyRebuiltHazards);
+                return;
+            }
             runtime = (WorldAuditRuntime)AccessTools.Field(typeof(WorldAuditModSystem), "_runtime").GetValue(api.ModLoader.GetModSystem<WorldAuditModSystem>())!;
             alice = CreatePlayer(9001, "WorldAuditAlice");
             bob = CreatePlayer(9002, "WorldAuditBob");
             Check("player attribution + ordinary rollback/undo", OrdinaryBlocks);
             Check("tree felling + rollback/undo", TreeFelling);
+            Check("fire ticks, fuel destruction and rollback", FireDamage);
+            Check("burning ground-storage rebuild", RebuildPile);
+            Check("detonation rollback, restore and undo", RebuildBomb);
             Check("door placement, toggle, break + rollback/undo", Door);
             Check("paired doors", PairedDoors);
             Check("restored rotated door collision boxes", RotatedDoor);
@@ -69,13 +78,26 @@ public sealed class ServerTests : ModSystem
             Check("filled trunk break preserves contents through rollback/undo", FilledTrunk);
             Check("rollback preserves newer player changes", RollbackConflict);
             Check("config reload keeps block and container capture active", ReloadCapture);
-            await AdminReadKeepsTicking();
+            await VerifyAuditChat();
+            await StorageCommandScenarios();
+            await FilterCommandScenarios();
+            await DelayedContainerAttribution();
+            await AdminCommandKeepsTicking("/wa purge t:1s", false);
+            await OnServer(() => AuditChatPackets.Read(alice));
+            await AdminCommandKeepsTicking("/wa purge confirm t:365d", true, () => OnServer(() =>
+            {
+                var lines = AuditChatPackets.Read(alice).Select(packet => packet.Chatline?.Message).OfType<string>();
+                Require(lines.Any(line => line.Contains("[WA] Purged 0 record(s).")), "Moderator did not receive the confirmed purge result.");
+            }));
+            await HighVolumeCommands();
+            Check("rebuilt hazards remain inert after game ticks", VerifyRebuiltHazards);
         }
         catch (Exception e) { results.Add(new { name = "fixture startup", passed = false, error = e.ToString() }); }
         finally
         {
-            File.WriteAllText(ReportPath, JsonSerializer.Serialize(new { game = GameVersion.ShortGameVersion, world = api.WorldManager.SaveGame.SavegameIdentifier, results }, new JsonSerializerOptions { WriteIndented = true }));
-            api.Logger.Notification("[WorldAudit.ServerTests] Finished. {0}", ReportPath);
+            var path = checkingReload ? Path.ChangeExtension(ReportPath, "reload.json") : ReportPath;
+            File.WriteAllText(path, JsonSerializer.Serialize(new { game = GameVersion.ShortGameVersion, world = api.WorldManager.SaveGame.SavegameIdentifier, results }, new JsonSerializerOptions { WriteIndented = true }));
+            api.Logger.Notification("[WorldAudit.ServerTests] Finished. {0}", path);
         }
     }
 
@@ -103,11 +125,15 @@ public sealed class ServerTests : ModSystem
         Require(transactions.Any(row => row.Actor.ExternalId == alice.Player.PlayerUID && row.Lines.Any(line => line.QuantityDelta == 2)), "Container capture did not persist after reload.");
     }
 
-    private async Task AdminReadKeepsTicking()
+    private async Task AdminCommandKeepsTicking(string commandText, bool requiresPlayer, Func<Task>? verify = null)
     {
-        const string name = "purge preview leaves game ticks running during a database lock";
+        var name = commandText + " leaves game ticks running during a database lock";
         var ticks = 0;
-        var listener = api.Event.RegisterGameTickListener(_ => Interlocked.Increment(ref ticks), 50);
+        var registered = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        api.Event.EnqueueMainThreadTask(() =>
+            registered.SetResult(api.Event.RegisterGameTickListener(_ => Interlocked.Increment(ref ticks), 50)),
+            "worldaudit-test-heartbeat-start");
+        var listener = await registered.Task.WaitAsync(TimeSpan.FromSeconds(3));
         try
         {
             await runtime.FlushAsync();
@@ -126,9 +152,9 @@ public sealed class ServerTests : ModSystem
                 try
                 {
                     var timer = System.Diagnostics.Stopwatch.StartNew();
-                    api.ChatCommands.ExecuteUnparsed("/wa purge t:1s", new TextCommandCallingArgs
+                    api.ChatCommands.ExecuteUnparsed(commandText, new TextCommandCallingArgs
                     {
-                        Caller = new Caller { Type = EnumCallerType.Console, CallerPrivileges = ["*"] },
+                        Caller = requiresPlayer ? new Caller { Player = alice.Player, CallerPrivileges = ["*"] } : new Caller { Type = EnumCallerType.Console, CallerPrivileges = ["*"] },
                         LanguageCode = "en"
                     }, result =>
                     {
@@ -145,6 +171,7 @@ public sealed class ServerTests : ModSystem
             await transaction.RollbackAsync();
             if (advanced < 5) throw new InvalidOperationException($"Only {advanced} game ticks ran during the lock.");
             await Task.Delay(250);
+            if (verify is not null) await verify();
             results.Add(new { name, passed = true, ticksDuringLock = advanced });
         }
         catch (Exception exception)
@@ -347,16 +374,21 @@ public sealed class ServerTests : ModSystem
         alice.Player.InventoryManager.OpenInventory(inventory); bob.Player.InventoryManager.OpenInventory(inventory);
         Move(alice, inventory, 0, Stack("game:rock-granite", 4));
         Move(bob, inventory, 1, Stack("game:rock-basalt", 3));
+        Move(alice, inventory, 2, Stack("game:rock-granite", 2));
         runtime.FlushAsync().GetAwaiter().GetResult();
         var history = runtime.Repository.GetContainerHistoryAsync(new(runtime.Options.WorldId!, AuditPos(pos), Limit: 100)).GetAwaiter().GetResult();
-        Require(history.Count == 2, "Expected exactly two chest transactions; got " + history.Count);
-        Require(history[0].Actor.ExternalId == bob.Player.PlayerUID && history[1].Actor.ExternalId == alice.Player.PlayerUID, "Chest actor follows viewer instead of mover");
+        Require(history.Count == 3, "Expected three chest transactions; got " + history.Count);
+        var aliceRows = history.Where(t => t.Actor.ExternalId == alice.Player.PlayerUID).ToArray();
+        var bobRow = history.Single(t => t.Actor.ExternalId == bob.Player.PlayerUID);
+        Require(aliceRows.Length == 2 && aliceRows[0].VisitId != null && aliceRows[0].VisitId == aliceRows[1].VisitId,
+            "Alice's interleaved moves did not share one visit");
+        Require(bobRow.VisitId != null && bobRow.VisitId != aliceRows[0].VisitId, "Bob's visit was missing or shared with Alice");
         var job = Rollback(pos, containers: true);
-        Require(inventory[0].Empty && inventory[1].StackSize == 3, "Chest rollback changed Bob's slot or failed to remove Alice's items");
-        Undo(job); Require(inventory[0].StackSize == 4 && inventory[1].StackSize == 3, "Chest undo lost contents");
+        Require(inventory[0].Empty && inventory[2].Empty && inventory[1].StackSize == 3, "Chest rollback changed Bob's slot or failed to remove Alice's items");
+        Undo(job); Require(inventory[0].StackSize == 4 && inventory[1].StackSize == 3 && inventory[2].StackSize == 2, "Chest undo lost contents");
         runtime.FlushAsync().GetAwaiter().GetResult();
         history = runtime.Repository.GetContainerHistoryAsync(new(runtime.Options.WorldId!, AuditPos(pos), Limit: 100)).GetAwaiter().GetResult();
-        Require(history.Count(t => t.SourceJobId is null) == 2, "Rollback leaked ordinary chest audit events");
+        Require(history.Count(t => t.SourceJobId is null) == 3, "Rollback leaked ordinary chest audit events");
     }
     private void FilledTrunk()
     {

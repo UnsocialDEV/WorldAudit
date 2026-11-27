@@ -9,8 +9,12 @@ public sealed class RollbackPlanner
     private readonly IAuditRepository _repository;
     private readonly WorldAuditOptions _options;
 
-    public RollbackPlanner(IAuditRepository repository, WorldAuditOptions options)
+    internal SemaphoreSlim HistoryAccess { get; } = new(1, 1);
+    private readonly IAuditWriter? _writer;
+
+    public RollbackPlanner(IAuditRepository repository, WorldAuditOptions options, IAuditWriter? writer = null)
     {
+        _writer = writer;
         _repository = repository;
         _options = options;
     }
@@ -56,6 +60,8 @@ public sealed class RollbackPlanner
         AuditActor requestedBy,
         CancellationToken cancellationToken = default)
     {
+        await HistoryAccess.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var access = new HistoryAccessLease(HistoryAccess);
         var sourceJob = await _repository.GetRollbackJobAsync(sourceJobId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Job #{sourceJobId} was not found.");
         if (!string.IsNullOrWhiteSpace(_options.WorldId) && !string.Equals(_options.WorldId, sourceJob.WorldId, StringComparison.Ordinal))
@@ -67,24 +73,8 @@ public sealed class RollbackPlanner
         }
 
         var inverseOperation = Invert(sourceJob.Operation);
-        var sourceEvents = await _repository.GetRollbackJobSourceBlockEventsAsync(
-            sourceJobId,
-            appliedOnly: true,
-            cancellationToken).ConfigureAwait(false);
-        var sourceTransactions = await _repository.GetRollbackJobSourceContainerTransactionsAsync(
-            sourceJobId,
-            appliedOnly: true,
-            cancellationToken).ConfigureAwait(false);
-
-        return await CreatePreviewJobAsync(
-            sourceJob.WorldId,
-            requestedBy,
-            $"undo job #{sourceJobId}",
-            inverseOperation,
-            sourceEvents,
-            sourceTransactions,
-            cancellationToken,
-            reverseSource: true).ConfigureAwait(false);
+        return await _repository.FreezeRollbackPreviewAsync(new(sourceJob.WorldId, requestedBy, inverseOperation,
+            $"undo job #{sourceJobId}", default, null, _options.RollbackPreviewLimit, sourceJobId), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<RollbackJob> PreviewAsync(
@@ -100,100 +90,26 @@ public sealed class RollbackPlanner
         ArgumentNullException.ThrowIfNull(filters);
         ArgumentNullException.ThrowIfNull(requestedBy);
 
-        var selectionQuery = new RollbackBlockSelectionQuery(
-            worldId,
-            center,
-            filters.Radius ?? 5,
-            filters.TimeRange,
-            filters.ActorName,
-            filters.Cause,
-            filters.Action,
-            filters.IncludeCodes,
-            filters.ExcludeCodes,
-            _options.RollbackPreviewLimit);
-
-        var selectedEvents = filters.IncludeBlocks
-            ? await _repository.SelectRollbackBlockEventsAsync(selectionQuery, cancellationToken).ConfigureAwait(false)
-            : Array.Empty<BlockAuditEvent>();
-        var selectedTransactions = filters.IncludeContainers
-            ? await _repository.SelectRollbackContainerTransactionsAsync(
-                new ContainerRollbackSelectionQuery(
-                    worldId,
-                    center,
-                    filters.Radius ?? 5,
-                    filters.TimeRange,
-                    filters.ActorName,
-                    filters.Cause,
-                    filters.IncludeCodes,
-                    filters.ExcludeCodes,
-                    _options.RollbackPreviewLimit),
-                cancellationToken).ConfigureAwait(false)
-            : Array.Empty<ContainerAuditTransaction>();
-
-        return await CreatePreviewJobAsync(
-            worldId,
-            requestedBy,
-            string.IsNullOrWhiteSpace(filterSummary) ? $"{ToLabel(operation)} preview" : filterSummary,
-            operation,
-            selectedEvents,
-            selectedTransactions,
-            cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<RollbackJob> CreatePreviewJobAsync(
-        string worldId,
-        AuditActor requestedBy,
-        string filterSummary,
-        RollbackJobOperation operation,
-        IReadOnlyList<BlockAuditEvent> selectedEvents,
-        IReadOnlyList<ContainerAuditTransaction> selectedTransactions,
-        CancellationToken cancellationToken,
-        bool reverseSource = false)
-    {
-        var orderedEntries = Order(selectedEvents, selectedTransactions, reverseSource ? RollbackJobOperation.Rollback : operation);
-        var plannedBlockCount = 0;
-        var plannedContainerCount = 0;
-        var chunkSet = new HashSet<ChunkPosition>();
-        DateTimeOffset? oldestTargetOccurredAt = null;
-        var persistedEntries = new RollbackJobPlanEntryCreate[orderedEntries.Length];
-
-        for (var index = 0; index < orderedEntries.Length; index++)
+        await HistoryAccess.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var access = new HistoryAccessLease(HistoryAccess);
+        if (_writer is not null)
         {
-            var entry = orderedEntries[index];
-            persistedEntries[index] = new RollbackJobPlanEntryCreate(entry.TargetType, entry.SourceRecordId, index, reverseSource);
-
-            if (entry.TargetType == RollbackJobEntryTargetType.Block)
+            try
             {
-                plannedBlockCount++;
+                await _writer.FlushAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
             }
-            else
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                plannedContainerCount++;
-            }
-
-            chunkSet.Add(entry.Position.ToChunkPosition(_options.ChunkSize));
-
-            if (!oldestTargetOccurredAt.HasValue || entry.OccurredAt < oldestTargetOccurredAt.Value)
-            {
-                oldestTargetOccurredAt = entry.OccurredAt;
+                throw new InvalidOperationException("Could not persist recent audit history. Check /wa status and retry the preview.", exception);
             }
         }
 
-        var request = new RollbackJobCreateRequest(
-            worldId,
-            requestedBy,
-            operation,
-            filterSummary,
-            RollbackJobState.Previewed,
-            plannedBlockCount,
-            plannedContainerCount,
-            chunkSet.Count,
-            oldestTargetOccurredAt);
+        if (_writer?.Snapshot().RejectedEvents is > 0 and var missing)
+            filterSummary += $" | Warning: audit history may be incomplete ({missing} lost records since startup).";
 
-        return await _repository.CreateRollbackJobAsync(
-            request,
-            persistedEntries,
-            cancellationToken).ConfigureAwait(false);
+        var summary = string.IsNullOrWhiteSpace(filterSummary) ? $"{operation} preview" : filterSummary;
+        return await _repository.FreezeRollbackPreviewAsync(new(worldId, requestedBy, operation, summary, center,
+            filters, _options.RollbackPreviewLimit), cancellationToken).ConfigureAwait(false);
     }
 
     private static RollbackJobOperation Invert(RollbackJobOperation operation)
@@ -203,95 +119,4 @@ public sealed class RollbackPlanner
             : RollbackJobOperation.Rollback;
     }
 
-    private RollbackSourceEntry[] Order(
-        IReadOnlyList<BlockAuditEvent> blockEvents,
-        IReadOnlyList<ContainerAuditTransaction> containerTransactions,
-        RollbackJobOperation operation)
-    {
-        var results = new List<RollbackSourceEntry>(blockEvents.Count + containerTransactions.Count);
-
-        for (var index = 0; index < blockEvents.Count; index++)
-        {
-            var entry = blockEvents[index];
-            if (!entry.Id.HasValue)
-            {
-                continue;
-            }
-
-            results.Add(new RollbackSourceEntry(RollbackJobEntryTargetType.Block, entry.Id.Value, entry.Position, entry.OccurredAt));
-        }
-
-        for (var index = 0; index < containerTransactions.Count; index++)
-        {
-            var entry = containerTransactions[index];
-            if (!entry.Id.HasValue)
-            {
-                continue;
-            }
-
-            results.Add(new RollbackSourceEntry(RollbackJobEntryTargetType.Container, entry.Id.Value, entry.Position, entry.OccurredAt));
-        }
-
-        results.Sort((left, right) => CompareEntries(left, right, operation, _options.ChunkSize));
-        return results.ToArray();
-    }
-
-    private static string ToLabel(RollbackJobOperation operation)
-    {
-        return operation == RollbackJobOperation.Rollback ? "rollback" : "restore";
-    }
-
-    private static int CompareEntries(
-        RollbackSourceEntry left,
-        RollbackSourceEntry right,
-        RollbackJobOperation operation,
-        int chunkSize)
-    {
-        var occurredComparison = operation == RollbackJobOperation.Rollback
-            ? right.OccurredAt.CompareTo(left.OccurredAt)
-            : left.OccurredAt.CompareTo(right.OccurredAt);
-        if (occurredComparison != 0)
-        {
-            return occurredComparison;
-        }
-
-        if (left.TargetType == right.TargetType && left.TargetType == RollbackJobEntryTargetType.Block)
-        {
-            var leftChunk = left.Position.ToChunkPosition(chunkSize);
-            var rightChunk = right.Position.ToChunkPosition(chunkSize);
-            var chunkX = leftChunk.X.CompareTo(rightChunk.X);
-            if (chunkX != 0)
-            {
-                return chunkX;
-            }
-
-            var chunkZ = leftChunk.Z.CompareTo(rightChunk.Z);
-            if (chunkZ != 0)
-            {
-                return chunkZ;
-            }
-
-            var chunkY = leftChunk.Y.CompareTo(rightChunk.Y);
-            if (chunkY != 0)
-            {
-                return chunkY;
-            }
-        }
-
-        var targetTypeComparison = left.TargetType.CompareTo(right.TargetType);
-        if (targetTypeComparison != 0)
-        {
-            return targetTypeComparison;
-        }
-
-        return operation == RollbackJobOperation.Rollback
-            ? right.SourceRecordId.CompareTo(left.SourceRecordId)
-            : left.SourceRecordId.CompareTo(right.SourceRecordId);
-    }
-
-    private sealed record RollbackSourceEntry(
-        RollbackJobEntryTargetType TargetType,
-        long SourceRecordId,
-        BlockPosition Position,
-        DateTimeOffset OccurredAt);
 }

@@ -84,7 +84,7 @@ public sealed class VintageStoryBlockEventBridgeTests
         var selection = new BlockSelection { Position = new BlockPos(3, 65, 7) };
 
         var firstResult = InvokeCanPlaceOrBreakBlock(bridge, player, selection, out _);
-        await Task.Delay(350);
+        await Task.Delay(650);
         var secondResult = InvokeCanPlaceOrBreakBlock(bridge, player, selection, out _);
         await Task.Delay(100);
 

@@ -17,7 +17,6 @@ public sealed class VintageStoryBlockEventBridge
     private readonly System.Func<string> _worldIdAccessor;
     private readonly System.Func<string, bool> _isInspectEnabled;
     private readonly BlockMutationScopeManager _scopeManager;
-    private readonly VintageStoryInteractionAttributionTracker _interactionTracker;
     private readonly VintageStoryBlockEntitySnapshotCodec _snapshotCodec;
     private readonly VintageStoryBlockMutationObserver _mutationObserver;
     private readonly VintageStoryInspectRequestDispatcher _inspectDispatcher;
@@ -43,10 +42,9 @@ public sealed class VintageStoryBlockEventBridge
         _blockAuditEnabled = blockAuditEnabled;
         _worldIdAccessor = worldIdAccessor;
         _isInspectEnabled = isInspectEnabled;
-        _interactionTracker = interactionTracker;
         _snapshotCodec = snapshotCodec;
         _gameHooks = new VintageStoryGameHooks(api, new VintageStoryMutationMonitor(api.World, capture, scopeManager,
-            worldIdAccessor, blockAuditEnabled, exception => api.Logger.Error("[WorldAudit] Block snapshot failed: {0}", exception)));
+            worldIdAccessor, blockAuditEnabled, exception => api.Logger.Error("[WorldAudit] Block snapshot failed: {0}", exception)), isInspectEnabled);
         _inspectDispatcher = new VintageStoryInspectRequestDispatcher(
             inspectHandler,
             (operation, exception) => _api?.Logger?.Error("[WorldAudit] {0} failed: {1}", operation, exception));
@@ -116,14 +114,13 @@ public sealed class VintageStoryBlockEventBridge
                 return true;
             }
 
-            if (!_blockAuditEnabled())
+            if (VintageStoryGameHooks.Active || !_blockAuditEnabled())
             {
                 return false;
             }
 
             var pos = blockSel.Position.Copy();
             var oldSnapshot = _snapshotCodec.Capture(pos);
-            RecordInteraction(byPlayer.PlayerName, byPlayer.PlayerUID, pos, oldSnapshot);
             SeedPlayerScope(byPlayer.PlayerName, byPlayer.PlayerUID, pos, oldSnapshot);
             return false;
         }
@@ -157,7 +154,7 @@ public sealed class VintageStoryBlockEventBridge
                 return true;
             }
 
-            SeedPlayerScope(byPlayer, blockSel.Position.Copy(), null);
+            if (!VintageStoryGameHooks.Active) SeedPlayerScope(byPlayer, blockSel.Position.Copy(), null);
             return true;
         }
         catch (Exception exception)
@@ -177,6 +174,7 @@ public sealed class VintageStoryBlockEventBridge
                 return;
             }
 
+            if (VintageStoryGameHooks.Active) return;
             var pos = blockSel.Position.Copy();
             SeedPlayerScope(byPlayer, pos, _snapshotCodec.Capture(pos));
         }
@@ -203,10 +201,6 @@ public sealed class VintageStoryBlockEventBridge
                 }
             }
 
-            if (_blockAuditEnabled())
-            {
-                RecordInteraction(byPlayer.PlayerName, byPlayer.PlayerUID, blockSel.Position.Copy(), null);
-            }
         }
         catch (Exception exception)
         {
@@ -240,11 +234,6 @@ public sealed class VintageStoryBlockEventBridge
                 actorExternalId,
                 oldBlockEntitySnapshot,
                 DateTimeOffset.UtcNow.AddSeconds(1)));
-    }
-
-    private void RecordInteraction(string actorName, string? actorExternalId, BlockPos position, byte[]? oldBlockEntitySnapshot)
-    {
-        _interactionTracker.Record(_worldIdAccessor(), position, actorName, actorExternalId, oldBlockEntitySnapshot);
     }
 
     private void SafeShowInspectIndicator(IServerPlayer player)

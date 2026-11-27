@@ -9,6 +9,7 @@ public sealed class SqliteAuditRepository : IAuditRepository
 {
     private readonly SqliteAuditWriteStore _writeStore;
     private readonly SqliteAuditQueryStore _queryStore;
+    private readonly SqliteRollbackPreview _preview;
     private readonly SqliteAuditRollbackStore _rollbackStore;
 
     public SqliteAuditRepository(SqliteConnectionFactory connectionFactory, WorldAuditOptions options, AuditPerformanceDiagnostics? diagnostics = null)
@@ -17,6 +18,7 @@ public sealed class SqliteAuditRepository : IAuditRepository
         var resolver = new SqliteAuditLookupResolver(state);
         var reader = new SqliteAuditRecordReader();
 
+        _preview = new(state, resolver);
         _writeStore = new SqliteAuditWriteStore(state, resolver);
         _queryStore = new SqliteAuditQueryStore(state, resolver, reader);
         _rollbackStore = new SqliteAuditRollbackStore(state, resolver, reader);
@@ -47,6 +49,15 @@ public sealed class SqliteAuditRepository : IAuditRepository
         ContainerRollbackSelectionQuery query,
         CancellationToken cancellationToken = default)
         => _queryStore.SelectRollbackContainerTransactionsAsync(query, cancellationToken);
+
+    public async Task<RollbackJob> FreezeRollbackPreviewAsync(RollbackPreviewSelection selection, CancellationToken cancellationToken = default)
+    {
+        var id = await _preview.CreateAsync(selection, cancellationToken).ConfigureAwait(false);
+        return (await GetRollbackJobAsync(id, cancellationToken).ConfigureAwait(false))!;
+    }
+
+    public Task<IReadOnlyList<RollbackPlanEntry>> GetRollbackPlanBatchAsync(long jobId, int limit, CancellationToken cancellationToken = default, bool validateSources = false)
+        => _rollbackStore.GetRollbackPlanEntriesAsync(jobId, cancellationToken, limit, validateSources);
 
     public Task<RollbackJob> CreateRollbackJobAsync(
         RollbackJobCreateRequest request,

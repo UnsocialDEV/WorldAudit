@@ -44,7 +44,8 @@ public sealed class BlockMutationCaptureService : IBlockMutationSink
             OldBlockEntitySnapshot: observation.OldBlockEntitySnapshot,
             NewBlockEntitySnapshot: observation.NewBlockEntitySnapshot,
             Flags: observation.Flags,
-            Layer: observation.Layer);
+            Layer: observation.Layer,
+            OperationId: observation.OperationId);
 
         _auditWriter.QueueBlockEvent(auditEvent);
     }

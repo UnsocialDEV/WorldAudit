@@ -1,5 +1,6 @@
 using Vintagestory.API.Common;
 using Vintagestory.API.Server;
+using WorldAudit.Application.Services;
 using WorldAudit.Domain;
 
 namespace WorldAudit.Presentation.Commands;
@@ -19,7 +20,7 @@ internal sealed class WorldAuditLookupCommandHandler
 
     private TextCommandResult ExecuteLookup(TextCommandCallingArgs args, bool useNearDefault)
     {
-        return _context.ExecuteSafely("lookup", () =>
+        return _context.ExecuteSafely(args, "lookup", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -29,6 +30,7 @@ internal sealed class WorldAuditLookupCommandHandler
             try
             {
                 var filters = _context.LookupCommandParser.Parse(WorldAuditCommandText.GetQueryTokens(args), DateTimeOffset.UtcNow);
+                filters = filters with { PageSize = filters.PageSize ?? Math.Clamp(_context.Config.DefaultPageSize, 1, LookupCommandParser.MaximumPageSize) };
                 if (useNearDefault && filters.Radius is null)
                 {
                     filters = filters with { Radius = _context.Config.DefaultNearRadius };
@@ -36,17 +38,18 @@ internal sealed class WorldAuditLookupCommandHandler
 
                 var center = WorldAuditCommandText.GetPlayerBlockPosition(player);
                 var worldId = _context.GetWorldId();
-                var blockResults = filters.IncludeBlocks
-                    ? _context.Runtime.BlockQueries.LookupAsync(worldId, center, filters).GetAwaiter().GetResult()
-                    : Array.Empty<BlockAuditEvent>();
-                var containerResults = filters.IncludeContainers
-                    ? _context.Runtime.ContainerQueries.LookupAsync(worldId, center, filters).GetAwaiter().GetResult()
-                    : Array.Empty<ContainerAuditTransaction>();
-
-                SendHistorySections(player, $"[WA] Lookup at {WorldAuditCommandText.FormatDisplayPosition(_context.Api, center)}", blockResults, containerResults);
-
-                var total = blockResults.Count + containerResults.Count;
-                return TextCommandResult.Success($"[WA] Found {total} audit record(s).", total);
+                var runtime = _context.Runtime;
+                var header = $"[WA] Lookup at {WorldAuditCommandText.FormatDisplayPosition(_context.Api, center)}";
+                return _context.Background.Run(player, "lookup", async () =>
+                {
+                    var blocks = filters.IncludeBlocks
+                        ? await runtime.BlockQueries.LookupAsync(worldId, center, filters).ConfigureAwait(false)
+                        : Array.Empty<BlockAuditEvent>();
+                    var containers = filters.IncludeContainers
+                        ? await runtime.ContainerQueries.LookupAsync(worldId, center, filters).ConfigureAwait(false)
+                        : Array.Empty<ContainerAuditTransaction>();
+                    return (blocks, containers);
+                }, results => SendHistorySections(player, header, results.blocks, results.containers));
             }
             catch (FormatException exception)
             {
@@ -61,7 +64,7 @@ internal sealed class WorldAuditLookupCommandHandler
         IReadOnlyList<BlockAuditEvent> blockResults,
         IReadOnlyList<ContainerAuditTransaction> containerResults)
     {
-        player.SendMessage(0, header, EnumChatType.CommandSuccess, null);
+        player.SendAuditLine(_context.AuditGroup(player), header, EnumChatType.CommandSuccess);
 
         var sentSection = false;
         if (blockResults.Count > 0)
@@ -69,12 +72,12 @@ internal sealed class WorldAuditLookupCommandHandler
             sentSection = true;
             if (containerResults.Count > 0)
             {
-                player.SendMessage(0, "[WA] Block history", EnumChatType.CommandSuccess, null);
+                player.SendAuditLine(_context.AuditGroup(player), "[WA] Block history", EnumChatType.CommandSuccess);
             }
 
             foreach (var line in _context.Formatter.FormatBlockResults(blockResults, DateTimeOffset.UtcNow))
             {
-                player.SendMessage(0, line, EnumChatType.CommandSuccess, null);
+                player.SendAuditLine(_context.AuditGroup(player), line, EnumChatType.CommandSuccess);
             }
         }
 
@@ -83,18 +86,18 @@ internal sealed class WorldAuditLookupCommandHandler
             sentSection = true;
             if (blockResults.Count > 0)
             {
-                player.SendMessage(0, "[WA] Container history", EnumChatType.CommandSuccess, null);
+                player.SendAuditLine(_context.AuditGroup(player), "[WA] Container history", EnumChatType.CommandSuccess);
             }
 
             foreach (var line in _context.Formatter.FormatContainerResults(containerResults, DateTimeOffset.UtcNow))
             {
-                player.SendMessage(0, line, EnumChatType.CommandSuccess, null);
+                player.SendAuditLine(_context.AuditGroup(player), line, EnumChatType.CommandSuccess);
             }
         }
 
         if (!sentSection)
         {
-            player.SendMessage(0, "[WA] No matching audit history found.", EnumChatType.CommandSuccess, null);
+            player.SendAuditLine(_context.AuditGroup(player), "[WA] No matching audit history found.", EnumChatType.CommandSuccess);
         }
     }
 }

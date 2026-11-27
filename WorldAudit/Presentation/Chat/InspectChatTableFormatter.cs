@@ -12,88 +12,36 @@ internal sealed class InspectChatTableFormatter
         IReadOnlyList<InspectChatRow> rows,
         int nextPage)
     {
-        const int detailWidth = 44;
+        static string Text(string value) => Commands.WorldAuditCommandText.EscapeChatText(value);
+        static string Heading(string value) => $"<font color=\"{AuditChatPalette.Accent}\"><strong>{Text(value)}</strong></font>";
+        static string Label(string value) => $"<font color=\"{AuditChatPalette.Accent}\">{Text(value)}</font>";
+        static string Value(string value) => $"<font color=\"{AuditChatPalette.Value}\">{Text(value)}</font>";
 
-        static IReadOnlyList<string> Wrap(string value, int width)
+        var lines = new List<string>
         {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return [string.Empty];
-            }
-
-            var parts = new List<string>();
-            var words = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var current = string.Empty;
-
-            foreach (var word in words)
-            {
-                if (word.Length > width)
-                {
-                    if (!string.IsNullOrEmpty(current))
-                    {
-                        parts.Add(current);
-                        current = string.Empty;
-                    }
-
-                    for (var index = 0; index < word.Length; index += width)
-                    {
-                        parts.Add(word.Substring(index, Math.Min(width, word.Length - index)));
-                    }
-
-                    continue;
-                }
-
-                var candidate = string.IsNullOrEmpty(current)
-                    ? word
-                    : $"{current} {word}";
-
-                if (candidate.Length > width)
-                {
-                    parts.Add(current);
-                    current = word;
-                    continue;
-                }
-
-                current = candidate;
-            }
-
-            if (!string.IsNullOrEmpty(current))
-            {
-                parts.Add(current);
-            }
-
-            return parts;
-        }
-
-        var lines = new List<string>(rows.Count * 3 + 5)
-        {
-            $"[WA] Inspect: {displayPosition}"
+            Heading($"[WA] Inspect: {displayPosition}")
         };
 
         if (totalEventCount == 0)
         {
-            lines.Add("[WA] No audit history found for this location.");
+            lines.Add(Value("No audit history found for this location."));
             return lines;
         }
 
-        lines.Add($"[WA] Events {start}-{end} of {totalEventCount} | page {pageNumber}/{totalPages}");
-
-        foreach (var row in rows)
-        {
-            lines.Add($"[WA] {row.EventNumber}. {row.Type} | {row.When}");
-            lines.Add($"[WA]    by: {row.Who} | cause: {row.Why}");
-
-            var wrappedWhat = Wrap(row.What, detailWidth);
-            for (var index = 0; index < wrappedWhat.Count; index++)
-            {
-                var prefix = index == 0 ? "[WA]    " : "[WA]      ";
-                lines.Add($"{prefix}{wrappedWhat[index]}");
-            }
-        }
-
+        lines.Add(Label($"Events {start}–{end} of {totalEventCount}     •     Page {pageNumber} of {totalPages}"));
         if (totalPages > 1)
         {
-            lines.Add($"[WA] Interact with this location again for page {nextPage}/{totalPages}.");
+            lines.Add(Label($"Interact again for page {nextPage} of {totalPages}."));
+        }
+
+        foreach (var row in rows.Reverse())
+        {
+            lines.Add("");
+            lines.Add(Heading($"{row.EventNumber}. {row.Type}") + "     " + Value(row.When));
+            lines.Add(Label("Player  ") + Value(row.Who) + "        " + Label("Cause  ") + Value(row.Why));
+            lines.Add(Label("Action  ") + Value(row.What));
+            lines.Add($"<font color=\"{AuditChatPalette.Secondary}\">{Text(row.OccurredAt.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))} UTC</font>");
+            if (row.DetailId is long id) lines.Add(Label($"Details  /wa i details {id}"));
         }
 
         return lines;
@@ -107,4 +55,5 @@ internal sealed record InspectChatRow(
     string When,
     string Who,
     string Why,
-    string What);
+    string What,
+    long? DetailId = null);

@@ -42,6 +42,24 @@ public sealed class VintageStoryBlockEntitySnapshotCodecTests
     }
 
     [Fact]
+    public void FireReplaySourceAllowsOnlyTheCountdownToDiffer()
+    {
+        var codec = CreateCodec(new SnapshotEntity());
+        var state = new TreeAttribute();
+        state.SetString("startedByPlayerUid", "Alice");
+        state.SetFloat("remainingBurnDuration", 9);
+        var initial = state.ToBytes();
+        state.SetFloat("remainingBurnDuration", 4);
+        var later = state.ToBytes();
+
+        Assert.True(codec.AreEquivalent(initial, later, "game:fire"));
+        Assert.False(codec.AreEquivalent(initial, later, "game:firepit-lit"));
+        Assert.False(codec.AreEquivalent(initial, later));
+        state.SetString("startedByPlayerUid", "Bob");
+        Assert.False(codec.AreEquivalent(initial, state.ToBytes(), "game:fire"));
+    }
+
+    [Fact]
     public void SnapshotEquality_IgnoresAttributeOrderButPreservesValues()
     {
         var codec = CreateCodec(new SnapshotEntity());

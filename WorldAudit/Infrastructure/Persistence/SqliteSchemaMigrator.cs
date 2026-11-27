@@ -369,6 +369,36 @@ public sealed class SqliteSchemaMigrator
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (!await MigrationExistsAsync(connection, transaction, 9, cancellationToken).ConfigureAwait(false))
+        {
+            await ExecuteAsync(connection, transaction,
+                """
+                ALTER TABLE block_events ADD COLUMN operation_id TEXT;
+                ALTER TABLE container_transactions ADD COLUMN operation_id TEXT;
+                CREATE INDEX IF NOT EXISTS ix_container_lines_transaction ON container_transaction_lines(transaction_id);
+                INSERT INTO schema_migrations(version, applied_at_ms) VALUES (9, unixepoch('subsec') * 1000);
+                """, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await MigrationExistsAsync(connection, transaction, 10, cancellationToken).ConfigureAwait(false))
+        {
+            await ExecuteAsync(connection, transaction, ContainerVisitMigration.Sql, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await MigrationExistsAsync(connection, transaction, 11, cancellationToken).ConfigureAwait(false))
+        {
+            await ExecuteAsync(connection, transaction, """
+                ALTER TABLE rollback_jobs ADD COLUMN planned_visit_count INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX ix_job_entries_target ON rollback_job_entries(job_id, target_type_code, target_event_id);
+                UPDATE rollback_jobs SET planned_visit_count = (
+                    SELECT count(DISTINCT coalesce(vm.visit_id, e.target_event_id))
+                    FROM rollback_job_entries e LEFT JOIN container_visit_members vm ON vm.transaction_id=e.target_event_id
+                    WHERE e.job_id=rollback_jobs.id AND e.target_type_code='container'
+                ) WHERE planned_container_count > 0;
+                INSERT INTO schema_migrations(version, applied_at_ms) VALUES (11, unixepoch('subsec') * 1000);
+                """, cancellationToken).ConfigureAwait(false);
+        }
+
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 

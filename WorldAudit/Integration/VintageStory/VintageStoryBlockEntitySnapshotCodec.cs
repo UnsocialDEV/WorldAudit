@@ -2,6 +2,7 @@ using Vintagestory.API.Common;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using HarmonyLib;
+using WorldAudit.Domain;
 
 namespace WorldAudit.Integration.VintageStory;
 
@@ -93,6 +94,9 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
     }
 
     public bool AreEquivalent(byte[]? left, byte[]? right)
+        => AreEquivalent(left, right, sourceBlockCode: null);
+
+    internal bool AreEquivalent(byte[]? left, byte[]? right, string? sourceBlockCode)
     {
         if (ReferenceEquals(left, right)) return true;
         if (left is null || right is null) return false;
@@ -101,6 +105,13 @@ public sealed class VintageStoryBlockEntitySnapshotCodec
         {
             var leftTree = new TreeAttribute(); leftTree.FromBytes(left);
             var rightTree = new TreeAttribute(); rightTree.FromBytes(right);
+            // A fire's countdown advances between recorded transitions and during multi-tick rollback.
+            const string timer = "remainingBurnDuration";
+            if (FireBlock.Matches(sourceBlockCode) && leftTree[timer] is FloatAttribute && rightTree[timer] is FloatAttribute)
+            {
+                leftTree.RemoveAttribute(timer);
+                rightTree.RemoveAttribute(timer);
+            }
             return leftTree.Equals(_world, rightTree);
         }
         catch { return false; }

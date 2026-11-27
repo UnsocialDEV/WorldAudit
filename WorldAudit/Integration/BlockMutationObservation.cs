@@ -18,7 +18,8 @@ public sealed class BlockMutationObservation
         BlockMutationScope? AmbientScope = null,
         string? CurrentBlockCode = null,
         bool HasFireNeighbor = false,
-        int Layer = 1)
+        int Layer = 1,
+        string? OperationId = null)
     {
         this.WorldId = WorldId;
         this.Position = Position;
@@ -34,6 +35,7 @@ public sealed class BlockMutationObservation
         this.CurrentBlockCode = CurrentBlockCode;
         this.HasFireNeighbor = HasFireNeighbor;
         this.Layer = Layer;
+        this.OperationId = OperationId;
     }
 
     public string WorldId { get; }
@@ -62,4 +64,5 @@ public sealed class BlockMutationObservation
 
     public bool HasFireNeighbor { get; }
     public int Layer { get; }
+    public string? OperationId { get; }
 }

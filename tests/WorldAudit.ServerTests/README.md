@@ -4,12 +4,17 @@ This optional server mod invokes real game handlers with two registered `ServerP
 
 - Player names and UIDs on ordinary placement and breaking.
 - Axe felling of grown logs and foliage, followed by rollback and undo.
+- Burned ground-storage piles and detonated bombs rebuild inert. The runner opens the same save a second time to verify the marked firewood, pile orientation, bomb variant, and adjacent blocks after restart.
 - Door halves, paired-door toggles, rotated server collision boxes, and rollback/undo without collateral `#unknown` events.
 - Chisel conversion and a voxel packet, including exact geometry and snow-cover roundtrip through rollback/undo.
 - Shared-chest inventory packets from two players; selective rollback preserves the other player's slot, and undo restores contents without duplicate ordinary events.
 - Breaking a filled trunk retains its native inventory snapshot; rollback restores quantities, durability and custom item attributes, and undo returns the location to air.
 - Refusal to overwrite a newer block placed by the other player.
-- Purge preview returns promptly while its database table is locked, and game ticks continue until the lock is released.
+- Game ticks continue during lookup, near, rollback preview, purge preview, and confirmed purge while the test holds a database lock. Lookup and near return correctly ordered rows from a fixture with 33,000 blocks and 33,000 container transactions. With a preview batch size of 32, the mixed job includes every matching block edit and storage transaction.
+- A mixed rollback started immediately after a trunk break includes pending writes. Apply and undo preserve independent withdrawals and native item attributes.
+- Lookup output and persisted rollback entries agree on block-action, storage-code, and moved-item filters.
+- Deferred inventory callbacks retain their initiating player when two players use a chest.
+- Two moderator connections receive General chat. Only the requester receives their inspect pages, lookup results and job details in the WorldAudit group.
 - Configuration reload succeeds and leaves block capture and the container bridge active, including when optional client libraries are absent from a dedicated installation.
 
 Build and run from the repository root with .NET 10 and Vintage Story 1.22.7 installed:

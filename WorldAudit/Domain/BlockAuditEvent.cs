@@ -15,4 +15,5 @@ public sealed record BlockAuditEvent(
     int Flags = 0,
     long? SourceJobId = null,
     long? SourceEventId = null,
-    int Layer = 1);
+    int Layer = 1,
+    string? OperationId = null);

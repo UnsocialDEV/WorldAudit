@@ -10,4 +10,6 @@ public sealed record RollbackBlockSelectionQuery(
     BlockAuditAction? Action = null,
     IReadOnlyList<string>? IncludeCodes = null,
     IReadOnlyList<string>? ExcludeCodes = null,
-    int Limit = 5_000);
+    int Limit = 5_000,
+    bool SkipFlameOnlyChanges = true,
+    bool ExcludeJobHistory = true);

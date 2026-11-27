@@ -211,6 +211,19 @@ public sealed class Phase6MaintenanceTests : IAsyncLifetime
 
         Assert.False(result.Succeeded);
         Assert.Contains("skipped", result.Summary, StringComparison.OrdinalIgnoreCase);
+        var due = new DateTimeOffset(2026, 3, 17, 12, 0, 0, TimeSpan.Zero);
+        var preview = Assert.Single(await _runtime.Repository.GetRollbackJobsAsync());
+        var maintenance = Assert.IsType<AuditMaintenanceService>(_runtime.MaintenanceService);
+        var checks = maintenance.BlockingJobChecks;
+        for (var tick = 1; tick <= 80; tick++)
+            Assert.Same(result, await _runtime.ProcessMaintenanceTickAsync(now: due.AddMilliseconds(tick * 50)));
+        Assert.Equal(checks, maintenance.BlockingJobChecks);
+        Assert.False((await _runtime.ProcessMaintenanceTickAsync(now: due.AddSeconds(5))).Succeeded);
+        Assert.Equal(checks + 1, maintenance.BlockingJobChecks);
+        await _runtime.RollbackCoordinator.CancelAsync(preview.Id);
+        Assert.True((await _runtime.ProcessMaintenanceTickAsync(now: due.AddSeconds(10))).Succeeded);
+        Assert.Equal(checks + 2, maintenance.BlockingJobChecks);
+        Assert.Empty(await _runtime.BlockQueries.GetHistoryAsync("main", position));
     }
 
     private async Task<WorldAuditRuntime> CreateRuntimeAsync(int retentionDays)

@@ -4,6 +4,8 @@ namespace WorldAudit.Application.Services;
 
 public sealed class LookupCommandParser
 {
+    internal const int MaximumPageSize = 100;
+
     public LookupFilters Parse(IEnumerable<string> tokens, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(tokens);
@@ -111,9 +113,9 @@ public sealed class LookupCommandParser
 
             if (token.StartsWith("p:", StringComparison.OrdinalIgnoreCase))
             {
-                if (!int.TryParse(token[2..], out var parsedPageSize) || parsedPageSize <= 0)
+                if (!int.TryParse(token[2..], out var parsedPageSize) || parsedPageSize is < 1 or > MaximumPageSize)
                 {
-                    throw new FormatException($"Invalid page size token '{token}'.");
+                    throw new FormatException($"Invalid page size token '{token}'. Choose a count from 1 to {MaximumPageSize}.");
                 }
 
                 pageSize = parsedPageSize;

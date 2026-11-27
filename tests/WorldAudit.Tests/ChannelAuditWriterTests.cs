@@ -53,6 +53,70 @@ public sealed class ChannelAuditWriterTests
             () => writer.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
+    [Fact]
+    public async Task ConcurrentFlushRegistrationAndConsumerFailure_LeaveNoWaitersOrPendingRecords()
+    {
+        var writing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var repository = WorldAudit.Tests.TestSupport.ProxyFactory.Create<IAuditRepository>(proxy =>
+            proxy.SetHandler(nameof(IAuditRepository.WriteBlockEventsAsync), _ =>
+            {
+                writing.SetResult();
+                return release.Task;
+            }));
+        var writer = new ChannelAuditWriter(repository, CreateOptions());
+        writer.QueueBlockEvent(CreateEvent());
+        var beforeFailure = writer.FlushAsync();
+        await writing.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiters = Enumerable.Range(0, 64).Select(async _ =>
+        {
+            await start.Task;
+            await Assert.ThrowsAsync<InvalidOperationException>(() => writer.FlushAsync());
+        }).ToArray();
+        start.SetResult();
+        release.SetException(new InvalidOperationException("Test writer failed."));
+        await Task.WhenAll(waiters).WaitAsync(TimeSpan.FromSeconds(3));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => beforeFailure);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.FlushAsync());
+        Assert.Equal(0, writer.Snapshot().PendingEvents);
+        Assert.Equal(1, writer.Snapshot().RejectedEvents);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BacklogBudgetIncludesBufferedAndInFlightEvents(bool pause)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var repository = WorldAudit.Tests.TestSupport.ProxyFactory.Create<IAuditRepository>(proxy =>
+            proxy.SetHandler(nameof(IAuditRepository.WriteBlockEventsAsync), _ =>
+            {
+                started.TrySetResult();
+                return release.Task;
+            }));
+        await using var writer = new ChannelAuditWriter(repository, CreateOptions());
+        var row = CreateEvent() with { OldBlockEntitySnapshot = new byte[1024 * 1024] };
+        if (pause) writer.Pause();
+        writer.QueueBlockEvent(row);
+        if (!pause) await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            for (var i = 1; i < 63; i++) writer.QueueBlockEvent(row);
+            Assert.Throws<InvalidOperationException>(() => writer.QueueBlockEvent(row));
+            Assert.Equal(1, writer.Snapshot().RejectedEvents);
+            Assert.Equal(63, writer.Snapshot().PendingEvents);
+        }
+        finally { release.TrySetResult(); }
+        await writer.FlushAsync().WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(63, writer.Snapshot().PersistedEvents);
+        Assert.Equal(0, writer.Snapshot().PendingEvents);
+        writer.QueueBlockEvent(row);
+        await writer.FlushAsync();
+    }
+
     private static WorldAuditOptions CreateOptions()
     {
         return new WorldAuditOptions
@@ -129,6 +193,12 @@ public sealed class ChannelAuditWriterTests
         {
             throw new NotSupportedException();
         }
+
+        public Task<RollbackJob> FreezeRollbackPreviewAsync(WorldAudit.Application.Services.RollbackPreviewSelection selection, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<RollbackPlanEntry>> GetRollbackPlanBatchAsync(long jobId, int limit, CancellationToken cancellationToken = default, bool validateSources = false)
+            => throw new NotSupportedException();
 
         public Task<RollbackJob> CreateRollbackJobAsync(RollbackJobCreateRequest request, IReadOnlyList<RollbackJobPlanEntryCreate> entries, CancellationToken cancellationToken = default)
         {

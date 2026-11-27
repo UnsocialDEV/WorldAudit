@@ -10,18 +10,28 @@ namespace WorldAudit.Presentation.Commands;
 
 internal static class WorldAuditCommandText
 {
-    public static readonly string HelpText = EscapeChatText(
+    public const string HelpText =
         """
-        [WA] /wa inspect - toggle inspect mode
-        [WA] /wa lookup [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
-        [WA] /wa near [t:<time>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
-        [WA] /wa rollback [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
-        [WA] /wa restore [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c]
-        [WA] /wa undo <jobId>
-        [WA] /wa apply <jobId> (apply/resume) | /wa cancel <jobId> | /wa jobs | /wa job <jobId>
-        [WA] /wa status | /wa reload | /wa consumer <pause|resume>
-        [WA] /wa purge t:<age> | /wa purge confirm t:<age>
-        """);
+        [WA] WorldAudit commands
+        /wa inspect — Toggle inspection, then interact with a location to read its history.
+        /wa i details <id> [page] — Read individual transactions from a storage entry.
+        /wa lookup [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c] — Search audit history.
+        /wa near [t:<time>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c] — Search nearby history.
+        /wa rollback [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c] — Preview reversal of matching changes.
+        Rollback skips earlier jobs by default. Use u:#rollback or u:#restore to select their changes.
+        /wa restore [t:<time>] [r:<radius>] [u:<user|#cause>] [a:<action>] [i:<codes>] [e:<codes>] [-b|-c] — Preview replay of matching changes.
+        /wa undo <jobId> — Preview reversal of a completed job.
+        /wa apply <jobId> — Apply or resume a previewed job.
+        /wa cancel <jobId> — Discard remaining job work.
+        /wa jobs — List recent jobs.
+        /wa job <jobId> [blocks|storage] [page] — Review a job and its frozen selection.
+        /wa job <jobId> storage details <id> [page] — Review selected transactions.
+        /wa status — Show storage and writer health.
+        /wa reload — Reload configuration.
+        /wa consumer <pause|resume> — Control audit writes.
+        /wa purge t:<age> — Preview removal of old audit history.
+        /wa purge confirm t:<age> — Delete audit history older than the specified age.
+        """;
 
     public static string EscapeChatText(string text) => text.Replace("<", "&lt;").Replace(">", "&gt;");
 
@@ -44,8 +54,7 @@ internal static class WorldAuditCommandText
 
     public static string FormatDisplayPosition(ICoreServerAPI api, BlockPosition position)
     {
-        var localPosition = new BlockPos(position.X, position.Y, position.Z).ToLocalPosition(api);
-        return $"{localPosition.X}, {localPosition.Y}, {localPosition.Z}";
+        return FormatDisplayPosition(api, new BlockPos(position.X, position.LocalY, position.Z, position.Dimension));
     }
 
     public static IEnumerable<string> GetQueryTokens(TextCommandCallingArgs args)
@@ -107,7 +116,7 @@ internal static class WorldAuditCommandText
 
     public static IReadOnlyList<InspectChatRow> BuildInspectRows(
         IReadOnlyList<BlockAuditEvent> blockResults,
-        IReadOnlyList<ContainerAuditTransaction> containerResults)
+        IReadOnlyList<ContainerInspectEntry> containerResults)
     {
         var rows = new List<InspectChatRow>(blockResults.Count + containerResults.Count);
         var now = DateTimeOffset.UtcNow;
@@ -121,14 +130,7 @@ internal static class WorldAuditCommandText
             ToDisplayText(auditEvent.Cause),
             DescribeInspectBlockAction(auditEvent))));
 
-        rows.AddRange(containerResults.Select(transaction => new InspectChatRow(
-            transaction.OccurredAt,
-            0,
-            FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType),
-            FormatRelativeTime(transaction.OccurredAt, now),
-            transaction.Actor.Name,
-            ToDisplayText(transaction.Cause),
-            DescribeInspectContainerAction(transaction))));
+        rows.AddRange(containerResults.Select(entry => ContainerInspectSummary.Format(entry, now)));
 
         return rows
             .OrderByDescending(row => row.OccurredAt)
@@ -136,30 +138,39 @@ internal static class WorldAuditCommandText
             .ToList();
     }
 
-    public static void SendPreviewReady(IServerPlayer player, RollbackJob job)
+    internal static string JobSelection(RollbackJob job) =>
+        $"[WA] Full selection: {job.PlannedBlockCount} block edits · {job.PlannedVisitCount} storage visits (including standalone changes) · {job.PlannedContainerCount} storage transactions\n" +
+        $"Browse /wa job {job.Id} blocks or /wa job {job.Id} storage. Apply covers the entire selection.";
+
+    public static void SendPreviewReady(IServerPlayer player, RollbackJob job, int groupId)
     {
-        player.SendMessage(0, $"[WA] Preview {DescribeOperation(job.Operation)} job #{job.Id} ready.", EnumChatType.CommandSuccess, null);
-        player.SendMessage(0, $"[WA] Selection: {job.FilterSummary}", EnumChatType.CommandSuccess, null);
-        player.SendMessage(
-            0,
-            $"[WA] Blocks: {job.PlannedBlockCount} | Containers: {job.PlannedContainerCount} | Chunks: {job.PlannedChunkCount} | Oldest edit: {FormatRelativeTime(job.OldestTargetOccurredAt, DateTimeOffset.UtcNow)}",
-            EnumChatType.CommandSuccess,
-            null);
-        player.SendMessage(0, $"[WA] Use /wa job {job.Id} to inspect, /wa apply {job.Id} to apply, or /wa cancel {job.Id} to discard.", EnumChatType.CommandSuccess, null);
+        player.SendAuditLine(groupId, $"[WA] Preview {DescribeOperation(job.Operation)} job #{job.Id} ready.", EnumChatType.CommandSuccess);
+        player.SendAuditLine(groupId, $"[WA] Selection: {job.FilterSummary}", EnumChatType.CommandSuccess);
+        player.SendAuditLine(
+            groupId,
+            $"[WA] Chunks: {job.PlannedChunkCount}\n[WA] Oldest edit: {FormatRelativeTime(job.OldestTargetOccurredAt, DateTimeOffset.UtcNow)}",
+            EnumChatType.CommandSuccess);
+        player.SendAuditLine(groupId, JobSelection(job), EnumChatType.CommandSuccess);
+        player.SendAuditLine(groupId, $"[WA] Use /wa job {job.Id} to inspect, /wa apply {job.Id} to apply, or /wa cancel {job.Id} to discard.", EnumChatType.CommandSuccess);
     }
 
     public static IEnumerable<string> FormatStatus(AuditStatusSnapshot status)
     {
         yield return "[WA] Status";
         yield return $"[WA] DB: {status.DatabasePath}";
-        yield return $"[WA] SQLite: {status.SqliteVersion} | WAL: {FormatBytes(status.WalSizeBytes)}";
-        yield return $"[WA] Consumer: {(status.WriterSnapshot.LastError is not null ? "faulted" : status.IsConsumerPaused ? "paused" : "running")} | Queue: {status.WriterSnapshot.PendingEvents} pending | Persisted: {status.WriterSnapshot.PersistedEvents}";
+        yield return status.StorageError is null
+            ? $"[WA] SQLite: {status.SqliteVersion}\n[WA] WAL: {FormatBytes(status.WalSizeBytes)}"
+            : $"[WA] Storage unavailable: {status.StorageError}";
+        yield return $"[WA] Consumer: {(status.WriterSnapshot.LastError is not null ? "faulted" : status.IsConsumerPaused ? "paused" : "running")}\n[WA] Queue: {status.WriterSnapshot.PendingEvents} pending\n[WA] Persisted: {status.WriterSnapshot.PersistedEvents}";
+        if (status.WriterSnapshot.RejectedEvents > 0)
+            yield return $"[WA] Audit history incomplete: {status.WriterSnapshot.RejectedEvents} record(s) lost since startup.";
         if (status.WriterSnapshot.LastError is not null)
         {
             yield return $"[WA] Writer error: {status.WriterSnapshot.LastError}";
         }
-        yield return $"[WA] Flush: {status.WriterSnapshot.FlushCount} total | last {status.WriterSnapshot.LastFlushBatchSize} in {status.WriterSnapshot.LastFlushDuration.TotalMilliseconds:0.0} ms | largest batch {status.WriterSnapshot.LargestFlushBatchSize}";
-        yield return $"[WA] Slow paths: queries {status.QueryPerformance.SlowQueryCount} | flushes {status.WriterSnapshot.SlowFlushCount} | WAL threshold {(status.IsWalThresholdExceeded ? "exceeded" : "ok")}";
+        yield return $"[WA] Flush: {status.WriterSnapshot.FlushCount} total | last {status.WriterSnapshot.LastFlushBatchSize} in {status.WriterSnapshot.LastFlushDuration.TotalMilliseconds:0.0} ms\n[WA] largest batch {status.WriterSnapshot.LargestFlushBatchSize}";
+        var walThreshold = status.StorageError is not null ? "unavailable" : status.IsWalThresholdExceeded ? "exceeded" : "ok";
+        yield return $"[WA] Slow paths: queries {status.QueryPerformance.SlowQueryCount}\n[WA] flushes {status.WriterSnapshot.SlowFlushCount}\n[WA] WAL threshold {walThreshold}";
         yield return $"[WA] Policy: checkpoint every {status.CheckpointPolicy.CheckpointInterval.TotalMinutes:0}m or {FormatBytes(status.CheckpointPolicy.WalSizeThresholdBytes)} WAL | optimize every {status.CheckpointPolicy.OptimizeInterval.TotalHours:0}h";
         yield return status.LastCheckpoint is null
             ? "[WA] Last checkpoint: none"
@@ -179,19 +190,19 @@ internal static class WorldAuditCommandText
     {
         yield return $"[WA] Purge preview for records older than {FormatAge(age)}.";
         yield return $"[WA] Cutoff: {preview.Cutoff:O}";
-        yield return $"[WA] Block events: {preview.BlockEventCount} | Container transactions: {preview.ContainerTransactionCount} | Rollback jobs: {preview.RollbackJobCount}";
-        yield return $"[WA] Total candidates: {preview.TotalCount} | Confirm with /wa purge confirm t:{FormatAgeToken(age)}";
+        yield return $"[WA] Block events: {preview.BlockEventCount}\n[WA] Container transactions: {preview.ContainerTransactionCount}\n[WA] Rollback jobs: {preview.RollbackJobCount}";
+        yield return $"[WA] Total candidates: {preview.TotalCount}\n[WA] Confirm with /wa purge confirm t:{FormatAgeToken(age)}";
     }
 
     public static IEnumerable<string> FormatPurgeResult(PurgeResult result)
     {
         yield return $"[WA] Purge complete for records older than {result.Cutoff:O}.";
-        yield return $"[WA] Deleted block events: {result.DeletedBlockEventCount} | container transactions: {result.DeletedContainerTransactionCount} | rollback jobs: {result.DeletedRollbackJobCount}";
+        yield return $"[WA] Deleted block events: {result.DeletedBlockEventCount}\n[WA] container transactions: {result.DeletedContainerTransactionCount}\n[WA] rollback jobs: {result.DeletedRollbackJobCount}";
         yield return $"[WA] SQLite maintenance: checkpoint {(result.CheckpointRan ? "ok" : "skipped")} | optimize {(result.OptimizeRan ? "ok" : "skipped")}";
         yield return $"[WA] Purged {result.TotalDeletedCount} record(s).";
     }
 
-    private static string DescribeInspectBlockAction(BlockAuditEvent auditEvent)
+    internal static string DescribeInspectBlockAction(BlockAuditEvent auditEvent)
     {
         return auditEvent.Action switch
         {
@@ -202,13 +213,7 @@ internal static class WorldAuditCommandText
         };
     }
 
-    private static string DescribeInspectContainerAction(ContainerAuditTransaction transaction)
-    {
-        var label = FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType);
-        return $"{label} changed: {DescribeContainerLines(transaction.Lines)}";
-    }
-
-    private static string DescribeContainerLines(IReadOnlyList<ContainerAuditLine> lines)
+    internal static string DescribeContainerLines(IReadOnlyList<ContainerAuditLine> lines)
     {
         if (lines.Count == 0)
         {
@@ -223,7 +228,7 @@ internal static class WorldAuditCommandText
         }));
     }
 
-    private static string FriendlyName(string? code)
+    internal static string FriendlyName(string? code)
     {
         if (string.IsNullOrWhiteSpace(code) || code.EndsWith(":air", StringComparison.OrdinalIgnoreCase))
         {

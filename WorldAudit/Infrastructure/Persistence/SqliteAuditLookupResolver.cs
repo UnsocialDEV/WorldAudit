@@ -154,7 +154,6 @@ internal sealed class SqliteAuditLookupResolver
         }
 
         return new ResolvedLookupFilters(
-            SqliteAuditSql.BuildFilterMask(actorId.HasValue, causeId.HasValue, actionId.HasValue),
             actorId,
             causeId,
             actionId);
@@ -258,7 +257,6 @@ internal sealed class SqliteAuditLookupResolver
 }
 
 internal sealed record ResolvedLookupFilters(
-    int FilterMask,
     long? ActorId,
     long? CauseId,
     long? ActionId);

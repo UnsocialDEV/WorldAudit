@@ -3,6 +3,7 @@ using Vintagestory.API.Server;
 using WorldAudit.Application.Services;
 using WorldAudit.Integration.VintageStory;
 using WorldAudit.Mod.Telemetry;
+using WorldAudit.Presentation.Chat;
 using WorldAudit.Presentation.Commands;
 
 namespace WorldAudit.Mod;
@@ -75,6 +76,7 @@ public sealed class WorldAuditModSystem : ModSystem
 
         RegisterPrivileges(api);
 
+        var chatFormatter = new ChatAuditFormatter(position => WorldAuditCommandText.FormatDisplayPosition(api, position));
         _chatCommands = new WorldAuditChatCommands(
             api,
             () => _runtime ?? throw new InvalidOperationException("WorldAudit runtime is not initialized."),
@@ -82,7 +84,7 @@ public sealed class WorldAuditModSystem : ModSystem
             new LookupCommandParser(),
             new PurgeCommandParser(),
             _inspectorState,
-            () => (_runtime ?? throw new InvalidOperationException("WorldAudit runtime is not initialized.")).ResultFormatter,
+            () => chatFormatter,
             GetWorldId,
             ReloadRuntime);
         _chatCommands.Register();
@@ -124,8 +126,8 @@ public sealed class WorldAuditModSystem : ModSystem
             _eventBridge?.Unregister();
             WorldAuditBlockMutationBehaviorRuntime.Reset();
             _containerEventBridge?.Unregister();
-            _runtime?.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            _telemetry?.Dispose();
+            try { _runtime?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+            finally { _telemetry?.Dispose(); }
         });
 
         _runtime = null;

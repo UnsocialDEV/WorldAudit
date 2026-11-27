@@ -59,7 +59,7 @@ public sealed class RollbackExecutionCoordinator
             }
         }
 
-        var plannedEntries = await _repository.GetRollbackPlanEntriesAsync(jobId, cancellationToken).ConfigureAwait(false);
+        var plannedEntries = await _repository.GetRollbackPlanBatchAsync(jobId, ReadAhead, cancellationToken, validateSources: true).ConfigureAwait(false);
         if (plannedEntries.Any(entry => !string.Equals(entry.WorldId, job.WorldId, StringComparison.Ordinal)))
             throw new InvalidOperationException("The job contains entries from another world.");
         if (plannedEntries.Count == 0)
@@ -72,7 +72,10 @@ public sealed class RollbackExecutionCoordinator
             return await _repository.GetRollbackJobAsync(jobId, cancellationToken).ConfigureAwait(false);
         }
 
-        var queuedJob = new QueuedRollbackJob(jobId, new Queue<RollbackPlanEntry>(plannedEntries));
+        var queuedJob = new QueuedRollbackJob(jobId, job.WorldId, new Queue<RollbackPlanEntry>(plannedEntries.Take(_options.RollbackMaxBlocksPerTick)))
+        {
+            HasMore = plannedEntries.Count > _options.RollbackMaxBlocksPerTick
+        };
 
         lock (_sync)
         {
@@ -120,6 +123,8 @@ public sealed class RollbackExecutionCoordinator
     {
         return GetActiveJobCount() > 0;
     }
+
+    private int ReadAhead => (int)Math.Min(1L + _options.RollbackMaxBlocksPerTick, int.MaxValue);
 
     private void ValidateWorld(string worldId)
     {
@@ -184,6 +189,14 @@ public sealed class RollbackExecutionCoordinator
             await PersistUpdatesAsync(jobToRun, cancellationToken).ConfigureAwait(false);
         }
 
+        if (jobToRun.PendingEntries.Count == 0 && jobToRun.HasMore)
+        {
+            var rows = await _repository.GetRollbackPlanBatchAsync(jobToRun.JobId, ReadAhead, cancellationToken).ConfigureAwait(false);
+            if (rows.Any(entry => entry.WorldId != jobToRun.World))
+                throw new InvalidOperationException("The job contains entries from another world.");
+            foreach (var row in rows.Take(_options.RollbackMaxBlocksPerTick)) jobToRun.PendingEntries.Enqueue(row);
+            jobToRun.HasMore = rows.Count > _options.RollbackMaxBlocksPerTick;
+        }
         var batch = BuildNextBatch(jobToRun);
         if (batch.Count == 0)
         {
@@ -222,7 +235,7 @@ public sealed class RollbackExecutionCoordinator
         }
 
         await PersistUpdatesAsync(jobToRun, cancellationToken).ConfigureAwait(false);
-        if (jobToRun.PendingEntries.Count == 0)
+        if (jobToRun.PendingEntries.Count == 0 && !jobToRun.HasMore)
             await CompleteActiveJobAsync(jobToRun.JobId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -454,13 +467,17 @@ public sealed class RollbackExecutionCoordinator
 
     private sealed class QueuedRollbackJob
     {
-        public QueuedRollbackJob(long jobId, Queue<RollbackPlanEntry> pendingEntries)
+        public QueuedRollbackJob(long jobId, string world, Queue<RollbackPlanEntry> pendingEntries)
         {
             JobId = jobId;
+            World = world;
             PendingEntries = pendingEntries;
         }
 
         public long JobId { get; }
+
+        public string World { get; }
+        public bool HasMore { get; set; }
 
         public Queue<RollbackPlanEntry> PendingEntries { get; }
 

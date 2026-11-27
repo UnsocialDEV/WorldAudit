@@ -8,6 +8,39 @@ namespace WorldAudit.Tests;
 
 public sealed class VintageStoryRollbackBlockApplierTests
 {
+    [Theory]
+    [InlineData("game:fire", "game:air", "game:fire")]
+    [InlineData("game:air", "game:fire", "game:air")]
+    [InlineData("game:fire", "game:fire", "game:fire")]
+    public async Task LegacyFlameOnlyRollbackMakesNoWorldWrites(string expected, string target, string current)
+    {
+        var harness = new Harness(current);
+        var result = await harness.Applier.ApplyAsync(Entry(expected, target));
+        Assert.Equal(RollbackBlockApplyStatus.Applied, result.Status);
+        Assert.False(result.ChangedWorld);
+        Assert.Equal(0, harness.Writes);
+    }
+
+    [Theory]
+    [InlineData("game:air", RollbackBlockApplyStatus.Applied)]
+    [InlineData("game:granite", RollbackBlockApplyStatus.Conflict)]
+    public async Task WoodReplacedByFireCanBeRecoveredAfterBurnout(string current, RollbackBlockApplyStatus status)
+    {
+        var harness = new Harness(current) { Target = new Block { BlockId = 4, Code = new AssetLocation("game:wood") } };
+        var result = await harness.Applier.ApplyAsync(Entry("game:fire", "game:wood") with { ExpectedBlockEntitySnapshot = [1] });
+        Assert.Equal(status, result.Status);
+        Assert.Equal(status == RollbackBlockApplyStatus.Applied ? "game:wood" : current, harness.Current.Code.ToString());
+    }
+
+    [Fact]
+    public async Task RollbackOfSolidPlacedOverFireLeavesAir()
+    {
+        var harness = new Harness("game:stone");
+        var result = await harness.Applier.ApplyAsync(Entry("game:stone", "game:fire") with { TargetBlockEntitySnapshot = [1] });
+        Assert.Equal(RollbackBlockApplyStatus.Applied, result.Status);
+        Assert.Equal("game:air", result.ActualBlockCode);
+    }
+
     [Fact]
     public async Task SolidReplay_DoesNotRunMultiblockPlacementOrRemovalCallbacks()
     {

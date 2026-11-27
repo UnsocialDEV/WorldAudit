@@ -13,4 +13,7 @@ public sealed record AuditStatusSnapshot(
     AuditCheckpointPolicySnapshot CheckpointPolicy,
     AuditCheckpointStatus? LastCheckpoint,
     AuditOptimizeStatus? LastOptimize,
-    bool IsWalThresholdExceeded);
+    bool IsWalThresholdExceeded)
+{
+    public string? StorageError { get; init; }
+}

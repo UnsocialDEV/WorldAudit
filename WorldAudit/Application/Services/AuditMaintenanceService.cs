@@ -7,6 +7,8 @@ public sealed class AuditMaintenanceService : IAuditMaintenanceService
     private readonly IAuditMaintenanceRepository _repository;
     private readonly object _sync = new();
     private MaintenanceRunStatus? _lastRun;
+    private long _blockingJobChecks;
+    internal long BlockingJobChecks => Interlocked.Read(ref _blockingJobChecks);
 
     public AuditMaintenanceService(IAuditMaintenanceRepository repository)
     {
@@ -37,6 +39,7 @@ public sealed class AuditMaintenanceService : IAuditMaintenanceService
 
     public Task<int> GetBlockingRollbackJobCountAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _blockingJobChecks);
         return _repository.GetBlockingRollbackJobCountAsync(cancellationToken);
     }
 

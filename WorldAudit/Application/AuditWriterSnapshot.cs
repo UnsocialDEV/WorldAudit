@@ -10,4 +10,5 @@ public sealed record AuditWriterSnapshot(
     int LastFlushBatchSize = 0,
     int LargestFlushBatchSize = 0,
     int SlowFlushCount = 0,
-    TimeSpan SlowestFlushDuration = default);
+    TimeSpan SlowestFlushDuration = default,
+    long RejectedEvents = 0);

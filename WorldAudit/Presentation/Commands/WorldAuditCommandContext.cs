@@ -4,6 +4,7 @@ using WorldAudit.Application;
 using WorldAudit.Application.Abstractions;
 using WorldAudit.Application.Services;
 using WorldAudit.Mod;
+using WorldAudit.Presentation.Chat;
 
 namespace WorldAudit.Presentation.Commands;
 
@@ -24,9 +25,12 @@ internal sealed class WorldAuditCommandContext
         InspectorStateService inspectorState,
         Func<IResultFormatter> formatterAccessor,
         Func<string> worldIdAccessor,
-        Func<(bool Success, string Message)> reloadHandler)
+        Func<(bool Success, string Message)> reloadHandler,
+        System.Func<IServerPlayer, int>? auditGroup = null)
     {
         Api = api;
+        AuditGroup = auditGroup ?? new WorldAuditChatTab(api).For;
+        Background = new BackgroundAuditCommand(api, AuditGroup);
         _runtimeAccessor = runtimeAccessor;
         _configAccessor = configAccessor;
         LookupCommandParser = lookupCommandParser;
@@ -36,6 +40,9 @@ internal sealed class WorldAuditCommandContext
         _worldIdAccessor = worldIdAccessor;
         _reloadHandler = reloadHandler;
     }
+
+    public System.Func<IServerPlayer, int> AuditGroup { get; }
+    public BackgroundAuditCommand Background { get; }
 
     public ICoreServerAPI Api { get; }
 
@@ -55,16 +62,16 @@ internal sealed class WorldAuditCommandContext
 
     public (bool Success, string Message) Reload() => _reloadHandler();
 
-    public TextCommandResult ExecuteSafely(string operation, Func<TextCommandResult> action)
+    public TextCommandResult ExecuteSafely(TextCommandCallingArgs args, string operation, Func<TextCommandResult> action)
     {
         var result = WorldAuditSafeExecution.Run(
             Api,
             operation,
             action,
             message => TextCommandResult.Error(message, "worldaudit_failure"));
-        if (result.StatusMessage is not null)
+        if (result.StatusMessage is not null && args.Caller?.Player is IServerPlayer)
         {
-            result.StatusMessage = WorldAuditCommandText.EscapeChatText(result.StatusMessage);
+            result.StatusMessage = AuditChatMarkup.Render(result.StatusMessage, result.Status == EnumCommandStatus.Error);
         }
         return result;
     }

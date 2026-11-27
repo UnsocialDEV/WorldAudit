@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <Reference Include="0Harmony" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/Lib/0Harmony.dll" Private="false" />
+    <Reference Include="VintagestoryLib" HintPath="$([System.IO.Path]::GetDirectoryName('$(VintageStoryApiPath)'))/VintagestoryLib.dll" Private="false" />
     <Reference Include="VintagestoryAPI">
       <HintPath>$(VintageStoryApiPath)</HintPath>
       <Private>true</Private>

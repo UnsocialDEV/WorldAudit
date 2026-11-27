@@ -29,11 +29,14 @@ public sealed class SqliteConnectionFactory
     public Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
         => OpenConnectionAsync(cancellationToken, commandTimeoutSeconds: null);
 
-    internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken, int? commandTimeoutSeconds)
+    internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken, int? commandTimeoutSeconds, bool privateCache = false)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_options.DatabasePath) ?? AppContext.BaseDirectory);
 
-        var connection = new SqliteConnection(_connectionString);
+        var connectionString = privateCache
+            ? new SqliteConnectionStringBuilder(_connectionString) { Cache = SqliteCacheMode.Private, Pooling = false }.ToString()
+            : _connectionString;
+        var connection = new SqliteConnection(connectionString);
         if (commandTimeoutSeconds.HasValue)
         {
             connection.DefaultTimeout = commandTimeoutSeconds.Value;

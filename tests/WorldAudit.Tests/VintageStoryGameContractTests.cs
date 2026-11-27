@@ -21,6 +21,45 @@ public sealed class GameHooksCollection;
 public sealed class VintageStoryGameContractTests
 {
     [Fact]
+    public void InspectPacketAvoidsEagerSnapshotsWhileActualWritesRetainPlayerAttribution()
+    {
+        var fixture = new WorldFixture();
+        var pos = new BlockPos(10, 65, 10);
+        fixture.Entity = new StateEntity { Pos = pos };
+        var api = ProxyFactory.Create<ICoreServerAPI>(p =>
+        {
+            p.SetValue("World", fixture.World);
+            p.SetValue("Logger", ProxyFactory.Create<ILogger>(_ => { }));
+        });
+        var inspecting = true;
+        using var hooks = new VintageStoryGameHooks(api, fixture.Monitor, _ => inspecting);
+        hooks.Register();
+        var type = typeof(Vintagestory.Server.ServerMain).Assembly.GetType("Vintagestory.Server.ServerSystemBlockSimulation")!;
+        var method = AccessTools.Method(type, "HandleBlockPlaceOrBreak");
+        var instance = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
+        var player = ProxyFactory.Create<IServerPlayer>(p =>
+        {
+            p.SetValue("PlayerUID", "alice");
+            p.SetValue("PlayerName", "Alice");
+        });
+        object?[] args = [instance, new object[] { player, new BlockSelection { Position = pos } }, method, null];
+        AccessTools.Method(typeof(VintageStoryGameHooks), "BeforeOperation").Invoke(null, args);
+        Assert.Equal(0, fixture.Entity.Captures);
+        using ((IDisposable)args[3]!)
+        {
+            fixture.Monitor.Touch(pos);
+            fixture.Set(pos, 1, "game:stone");
+        }
+        Assert.Equal("alice", Assert.Single(fixture.Sink.Events).AmbientScope?.ActorExternalId);
+        var captures = fixture.Entity.Captures;
+        inspecting = false;
+        args[3] = null;
+        AccessTools.Method(typeof(VintageStoryGameHooks), "BeforeOperation").Invoke(null, args);
+        Assert.True(fixture.Entity.Captures > captures);
+        ((IDisposable)args[3]!).Dispose();
+    }
+
+    [Fact]
     public void AllRequiredHooksInstallOnActual1227AssembliesAndDetach()
     {
         // Force the real gameplay assemblies to load before resolving patch targets.
@@ -36,6 +75,11 @@ public sealed class VintageStoryGameContractTests
         try
         {
             hooks.Register();
+            var server = typeof(Vintagestory.Server.ServerMain);
+            var callbacks = server.GetMethods().Where(m => m.DeclaringType == server &&
+                m.Name is "RegisterCallback" or "RegisterCallbackUnique" or "EnqueueMainThreadTask").ToArray();
+            Assert.Equal(4, callbacks.Length);
+            Assert.All(callbacks, m => Assert.Contains("worldaudit.1.22.7", Harmony.GetPatchInfo(m).Owners));
             // A failed reload can dispose a replacement before it was registered.
             new VintageStoryGameHooks(api, fixture.Monitor).Dispose();
             Assert.True(VintageStoryGameHooks.Active);
@@ -85,6 +129,56 @@ public sealed class VintageStoryGameContractTests
         tree.FromBytes(f.Sink.Events.Single(e => e.Position.Y == 65).NewBlockEntitySnapshot);
         Assert.Equal(42, tree.GetInt("value"));
         Assert.Null(f.Scopes.GetAmbientScope());
+    }
+
+    [Fact]
+    public async Task NestedKnownActorCompletesEarlierUnattributedTouch()
+    {
+        var f = new WorldFixture();
+        var pos = new BlockPos(10, 65, 10);
+        var unrelated = pos.UpCopy();
+        using (f.Monitor.Begin())
+        {
+            f.Monitor.Touch(pos);
+            using (f.Monitor.Begin(BlockMutationScope.Player("Alice", "alice")))
+            {
+                f.Monitor.Touch(pos);
+                f.Set(pos, 1, "game:stone");
+            }
+            f.Monitor.Touch(unrelated);
+            f.Set(unrelated, 1, "game:sand");
+        }
+        var alice = Assert.Single(f.Sink.Events, e => e.Position.Y == pos.Y);
+        Assert.Equal("alice", alice.AmbientScope?.ActorExternalId);
+        Assert.Equal("game:air", alice.OldBlockCode);
+        Assert.Null(Assert.Single(f.Sink.Events, e => e.Position.Y == unrelated.Y).AmbientScope);
+
+        await using var runtime = await WorldAudit.Mod.WorldAuditRuntime.CreateAsync(new WorldAuditOptions
+        {
+            DatabasePath = Path.Combine(Path.GetTempPath(), $"worldaudit-nested-{Guid.NewGuid():N}.db")
+        });
+        foreach (var observation in f.Sink.Events) runtime.BlockMutationCapture.Observe(observation);
+        var filters = new LookupCommandParser().Parse(["u:Alice"], DateTimeOffset.UtcNow);
+        var plan = await runtime.RollbackPlanner.PreviewRollbackAsync("save", alice.Position, filters, new("Admin"), "u:Alice");
+        var row = Assert.Single(await runtime.BlockQueries.LookupAsync("save", alice.Position, filters));
+        Assert.Equal("alice", row.Actor.ExternalId);
+        Assert.Equal(alice.Position, row.Position);
+        Assert.Equal(row.Id, Assert.Single(await runtime.Repository.GetRollbackBlockPlanEntriesAsync(plan.Id)).SourceEventId);
+    }
+
+    [Fact]
+    public void NestedClickCannotClaimAnEarlierUnownedMutation()
+    {
+        var f = new WorldFixture();
+        var pos = new BlockPos(10, 65, 10);
+        using (f.Monitor.Begin())
+        {
+            f.Monitor.Touch(pos);
+            f.Set(pos, 1, "game:stone");
+            using (f.Monitor.Begin(BlockMutationScope.Player("Bob", "bob")))
+                f.Monitor.Touch(pos);
+        }
+        Assert.Null(Assert.Single(f.Sink.Events).AmbientScope);
     }
 
     [Fact]
@@ -191,7 +285,12 @@ public sealed class VintageStoryGameContractTests
     private sealed class StateEntity : BlockEntity
     {
         internal int Value;
-        public override void ToTreeAttributes(ITreeAttribute tree) => tree.SetInt("value", Value);
+        internal int Captures;
+        public override void ToTreeAttributes(ITreeAttribute tree)
+        {
+            Captures++;
+            tree.SetInt("value", Value);
+        }
     }
     private sealed class Sink : IBlockMutationSink
     {

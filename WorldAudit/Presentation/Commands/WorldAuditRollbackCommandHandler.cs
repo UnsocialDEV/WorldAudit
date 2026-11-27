@@ -19,7 +19,7 @@ internal sealed class WorldAuditRollbackCommandHandler
 
     public TextCommandResult HandleUndo(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("undo preview", () =>
+        return _context.ExecuteSafely(args, "undo preview", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -31,28 +31,16 @@ internal sealed class WorldAuditRollbackCommandHandler
                 return TextCommandResult.Error("[WA] Provide a numeric job id, for example /wa undo 12.", "bad_job");
             }
 
-            try
-            {
-                var job = _context.Runtime.RollbackPlanner
-                    .PreviewUndoAsync(sourceJobId, new AuditActor(player.PlayerName, player.PlayerUID))
-                    .GetAwaiter()
-                    .GetResult();
-
-                WorldAuditCommandText.SendPreviewReady(player, job);
-                return TextCommandResult.Success(
-                    $"[WA] {WorldAuditCommandText.ToTitleCase(job.Operation)} preview job #{job.Id} created from job #{sourceJobId}.",
-                    job.Id);
-            }
-            catch (InvalidOperationException exception)
-            {
-                return TextCommandResult.Error($"[WA] {exception.Message}", "bad_undo");
-            }
+            var planner = _context.Runtime.RollbackPlanner;
+            var actor = new AuditActor(player.PlayerName, player.PlayerUID);
+            return _context.Background.Run(player, "undo preview", () => planner.PreviewUndoAsync(sourceJobId, actor),
+                job => WorldAuditCommandText.SendPreviewReady(player, job, _context.AuditGroup(player)));
         });
     }
 
     public TextCommandResult HandleApply(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("apply rollback job", () =>
+        return _context.ExecuteSafely(args, "apply rollback job", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -70,7 +58,7 @@ internal sealed class WorldAuditRollbackCommandHandler
                 return TextCommandResult.Error($"[WA] Job #{jobId} was not found.", "job_missing");
             }
 
-            player.SendMessage(0, $"[WA] Job #{job.Id} is {job.State.ToString().ToLowerInvariant()}.", EnumChatType.CommandSuccess, null);
+            player.SendAuditLine(_context.AuditGroup(player), $"[WA] Job #{job.Id} is {job.State.ToString().ToLowerInvariant()}.", EnumChatType.CommandSuccess);
             var message = job.State switch
             {
                 RollbackJobState.Queued or RollbackJobState.Running => $"[WA] {WorldAuditCommandText.ToTitleCase(job.Operation)} job #{job.Id} queued.",
@@ -85,7 +73,7 @@ internal sealed class WorldAuditRollbackCommandHandler
 
     public TextCommandResult HandleJobs(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("list rollback jobs", () =>
+        return _context.ExecuteSafely(args, "list rollback jobs", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -98,14 +86,14 @@ internal sealed class WorldAuditRollbackCommandHandler
                 return TextCommandResult.Success("[WA] No WorldAudit jobs found.", null);
             }
 
-            player.SendMessage(0, "[WA] Recent WorldAudit jobs", EnumChatType.CommandSuccess, null);
+            player.SendAuditLine(_context.AuditGroup(player), "[WA] Recent WorldAudit jobs", EnumChatType.CommandSuccess);
             foreach (var job in jobs)
             {
-                player.SendMessage(
-                    0,
-                    $"[WA] Job #{job.Id} | {WorldAuditCommandText.DescribeOperation(job.Operation)} | {job.State.ToString().ToLowerInvariant()} | blocks {job.AppliedBlockCount}/{job.PlannedBlockCount} | containers {job.AppliedContainerCount}/{job.PlannedContainerCount} | conflicts {job.ConflictBlockCount + job.ConflictContainerCount} | requested by {job.RequestedBy.Name}",
-                    EnumChatType.CommandSuccess,
-                    null);
+                player.SendAuditLine(_context.AuditGroup(player), "", EnumChatType.CommandSuccess);
+                player.SendAuditLine(
+                    _context.AuditGroup(player),
+                    $"[WA] Job #{job.Id} | {WorldAuditCommandText.DescribeOperation(job.Operation)} | {job.State.ToString().ToLowerInvariant()}\n[WA] Blocks: {job.AppliedBlockCount}/{job.PlannedBlockCount}     Containers: {job.AppliedContainerCount}/{job.PlannedContainerCount}     Conflicts: {job.ConflictBlockCount + job.ConflictContainerCount} \n[WA] Requested by: {job.RequestedBy.Name}",
+                    EnumChatType.CommandSuccess);
             }
 
             return TextCommandResult.Success($"[WA] Listed {jobs.Count} job(s).", jobs.Count);
@@ -114,7 +102,7 @@ internal sealed class WorldAuditRollbackCommandHandler
 
     public TextCommandResult HandleCancel(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("cancel rollback job", () =>
+        return _context.ExecuteSafely(args, "cancel rollback job", () =>
         {
             if (!WorldAuditCommandText.TryParseJobId(args, out var jobId))
                 return TextCommandResult.Error("[WA] Provide a numeric job id, for example /wa cancel 12.", "bad_job");
@@ -134,13 +122,15 @@ internal sealed class WorldAuditRollbackCommandHandler
 
     public TextCommandResult HandleJob(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("show rollback job", () =>
+        return _context.ExecuteSafely(args, "show rollback job", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
                 return TextCommandResult.Error("This command requires a player caller.", "not_player");
             }
 
+            var tokens = WorldAuditCommandText.GetQueryTokens(args).ToArray();
+            if (tokens.Length > 1) return new RollbackJobPageCommand(_context).Handle(player, tokens);
             if (!WorldAuditCommandText.TryParseJobId(args, out var jobId))
             {
                 return TextCommandResult.Error("[WA] Provide a numeric job id, for example /wa job 12.", "bad_job");
@@ -152,14 +142,14 @@ internal sealed class WorldAuditRollbackCommandHandler
                 return TextCommandResult.Error($"[WA] Job #{jobId} was not found.", "job_missing");
             }
 
-            player.SendMessage(0, $"[WA] Job #{job.Id} | {WorldAuditCommandText.DescribeOperation(job.Operation)} | {job.State.ToString().ToLowerInvariant()} | requested by {job.RequestedBy.Name}", EnumChatType.CommandSuccess, null);
-            player.SendMessage(
-                0,
-                $"[WA] Blocks: {job.AppliedBlockCount}/{job.PlannedBlockCount} | Containers: {job.AppliedContainerCount}/{job.PlannedContainerCount} | Conflicts: {job.ConflictBlockCount + job.ConflictContainerCount} | Failed: {job.FailedBlockCount + job.FailedContainerCount} | Chunks: {job.PlannedChunkCount}",
-                EnumChatType.CommandSuccess,
-                null);
-            player.SendMessage(0, $"[WA] Filters: {job.FilterSummary}", EnumChatType.CommandSuccess, null);
+            player.SendAuditLine(_context.AuditGroup(player), $"[WA] Job #{job.Id} | {WorldAuditCommandText.DescribeOperation(job.Operation)} | {job.State.ToString().ToLowerInvariant()} \n[WA] Requested by: {job.RequestedBy.Name}", EnumChatType.CommandSuccess);
+            player.SendAuditLine(
+                _context.AuditGroup(player),
+                $"[WA] Blocks: {job.AppliedBlockCount}/{job.PlannedBlockCount}\n[WA] Containers: {job.AppliedContainerCount}/{job.PlannedContainerCount}\n[WA] Conflicts: {job.ConflictBlockCount + job.ConflictContainerCount}\n[WA] Failed: {job.FailedBlockCount + job.FailedContainerCount}\n[WA] Chunks: {job.PlannedChunkCount}",
+                EnumChatType.CommandSuccess);
+            player.SendAuditLine(_context.AuditGroup(player), $"[WA] Filters: {job.FilterSummary}", EnumChatType.CommandSuccess);
 
+            player.SendAuditLine(_context.AuditGroup(player), WorldAuditCommandText.JobSelection(job), EnumChatType.CommandSuccess);
             var conflicts = _context.Runtime.Repository
                 .GetRollbackJobEntryDetailsAsync(job.Id, RollbackJobEntryResult.Conflict, 3)
                 .GetAwaiter()
@@ -167,11 +157,10 @@ internal sealed class WorldAuditRollbackCommandHandler
             foreach (var conflict in conflicts)
             {
                 var detail = string.IsNullOrWhiteSpace(conflict.ErrorText) ? "Conflict" : conflict.ErrorText;
-                player.SendMessage(
-                    0,
+                player.SendAuditLine(
+                    _context.AuditGroup(player),
                     $"[WA] {conflict.TargetType} conflict at {WorldAuditCommandText.FormatDisplayPosition(_context.Api, conflict.Position)} | {WorldAuditCommandText.FormatRelativeTime(conflict.SourceOccurredAt, DateTimeOffset.UtcNow)} | {detail}",
-                    EnumChatType.CommandError,
-                    null);
+                    EnumChatType.CommandError);
             }
 
             var failures = _context.Runtime.Repository
@@ -181,16 +170,15 @@ internal sealed class WorldAuditRollbackCommandHandler
             foreach (var failure in failures)
             {
                 var detail = string.IsNullOrWhiteSpace(failure.ErrorText) ? "Failed" : failure.ErrorText;
-                player.SendMessage(
-                    0,
+                player.SendAuditLine(
+                    _context.AuditGroup(player),
                     $"[WA] {failure.TargetType} failed at {WorldAuditCommandText.FormatDisplayPosition(_context.Api, failure.Position)} | {WorldAuditCommandText.FormatRelativeTime(failure.SourceOccurredAt, DateTimeOffset.UtcNow)} | {detail}",
-                    EnumChatType.CommandError,
-                    null);
+                    EnumChatType.CommandError);
             }
 
             if (!string.IsNullOrWhiteSpace(job.LastError))
             {
-                player.SendMessage(0, $"[WA] Last error: {job.LastError}", EnumChatType.CommandError, null);
+                player.SendAuditLine(_context.AuditGroup(player), $"[WA] Last error: {job.LastError}", EnumChatType.CommandError);
             }
 
             return TextCommandResult.Success($"[WA] Job #{job.Id} displayed.", job.Id);
@@ -199,7 +187,7 @@ internal sealed class WorldAuditRollbackCommandHandler
 
     private TextCommandResult HandlePreview(TextCommandCallingArgs args, RollbackJobOperation operation)
     {
-        return _context.ExecuteSafely($"{WorldAuditCommandText.DescribeOperation(operation)} preview", () =>
+        return _context.ExecuteSafely(args, $"{WorldAuditCommandText.DescribeOperation(operation)} preview", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -216,23 +204,14 @@ internal sealed class WorldAuditRollbackCommandHandler
                     ? $"{range.FromInclusive:yyyy-MM-dd HH:mm:ss} to {range.ToInclusive:yyyy-MM-dd HH:mm:ss} UTC"
                     : "all retained history";
                 var summary = $"{string.Join(' ', tokens)} | center: {WorldAuditCommandText.FormatDisplayPosition(_context.Api, center)} | radius: {filters.Radius ?? 5} | {period}";
-                var previewTask = operation == RollbackJobOperation.Rollback
-                    ? _context.Runtime.RollbackPlanner.PreviewRollbackAsync(
-                        _context.GetWorldId(),
-                        center,
-                        filters,
-                        new AuditActor(player.PlayerName, player.PlayerUID),
-                        summary)
-                    : _context.Runtime.RollbackPlanner.PreviewRestoreAsync(
-                        _context.GetWorldId(),
-                        center,
-                        filters,
-                        new AuditActor(player.PlayerName, player.PlayerUID),
-                        summary);
-
-                var createdJob = previewTask.GetAwaiter().GetResult();
-                WorldAuditCommandText.SendPreviewReady(player, createdJob);
-                return TextCommandResult.Success($"[WA] {WorldAuditCommandText.ToTitleCase(operation)} preview job #{createdJob.Id} created.", createdJob.Id);
+                var worldId = _context.GetWorldId();
+                var actor = new AuditActor(player.PlayerName, player.PlayerUID);
+                var planner = _context.Runtime.RollbackPlanner;
+                return _context.Background.Run(player, "rollback or restore preview", () =>
+                    operation == RollbackJobOperation.Rollback
+                        ? planner.PreviewRollbackAsync(worldId, center, filters, actor, summary)
+                        : planner.PreviewRestoreAsync(worldId, center, filters, actor, summary),
+                    job => WorldAuditCommandText.SendPreviewReady(player, job, _context.AuditGroup(player)));
             }
             catch (FormatException exception)
             {

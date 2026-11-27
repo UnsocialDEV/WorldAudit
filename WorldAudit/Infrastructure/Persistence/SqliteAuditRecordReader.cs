@@ -33,7 +33,8 @@ internal sealed class SqliteAuditRecordReader
                 Flags: reader.GetInt32(reader.GetOrdinal("flags")),
                 SourceJobId: reader.IsDBNull(reader.GetOrdinal("source_job_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_job_id")),
                 SourceEventId: reader.IsDBNull(reader.GetOrdinal("source_event_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_event_id")),
-                Layer: reader.GetInt32(reader.GetOrdinal("layer"))));
+                Layer: reader.GetInt32(reader.GetOrdinal("layer")),
+                OperationId: reader["operation_id"] as string));
         }
 
         return results;
@@ -67,7 +68,9 @@ internal sealed class SqliteAuditRecordReader
                     BeforeSnapshot: SqliteAuditValueCodec.ReadBlob(reader, "before_snapshot_blob"),
                     AfterSnapshot: SqliteAuditValueCodec.ReadBlob(reader, "after_snapshot_blob"),
                     Flags: reader.GetInt32(reader.GetOrdinal("flags")),
-                    SourceJobId: reader.IsDBNull(reader.GetOrdinal("source_job_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_job_id"))));
+                    SourceJobId: reader.IsDBNull(reader.GetOrdinal("source_job_id")) ? null : reader.GetInt64(reader.GetOrdinal("source_job_id")),
+                    OperationId: reader["operation_id"] as string,
+                    VisitId: reader["visit_id"] as string));
             }
         }
 
@@ -100,7 +103,9 @@ internal sealed class SqliteAuditRecordReader
                 AfterSnapshot: row.AfterSnapshot,
                 Lines: linesByTransactionId.TryGetValue(row.Id, out var lines) ? lines : Array.Empty<ContainerAuditLine>(),
                 Flags: row.Flags,
-                SourceJobId: row.SourceJobId);
+                SourceJobId: row.SourceJobId,
+                OperationId: row.OperationId,
+                VisitId: row.VisitId);
         }
 
         return results;
@@ -137,7 +142,8 @@ internal sealed class SqliteAuditRecordReader
                 FailedBlockCount: reader.GetInt32(reader.GetOrdinal("failed_block_count")),
                 FailedContainerCount: reader.GetInt32(reader.GetOrdinal("failed_container_count")),
                 OldestTargetOccurredAt: SqliteAuditValueCodec.ReadNullableUnixMilliseconds(reader, "oldest_target_occurred_at_ms"),
-                LastError: reader.IsDBNull(reader.GetOrdinal("last_error")) ? null : reader.GetString(reader.GetOrdinal("last_error"))));
+                LastError: reader.IsDBNull(reader.GetOrdinal("last_error")) ? null : reader.GetString(reader.GetOrdinal("last_error")),
+                PlannedVisitCount: reader.GetInt32(reader.GetOrdinal("planned_visit_count"))));
         }
 
         return results;
@@ -154,15 +160,8 @@ internal sealed class SqliteAuditRecordReader
             return new Dictionary<long, IReadOnlyList<ContainerAuditLine>>();
         }
 
-        var parameterNames = new List<string>(transactionIds.Count);
         await using var command = connection.CreateCommand();
-
-        for (var index = 0; index < transactionIds.Count; index++)
-        {
-            var parameterName = $"$transactionId{index}";
-            parameterNames.Add(parameterName);
-            command.Parameters.AddWithValue(parameterName, transactionIds[index]);
-        }
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(transactionIds));
 
         command.CommandText =
             $"""
@@ -178,7 +177,7 @@ internal sealed class SqliteAuditRecordReader
                 ctl.stack_after_blob
             FROM container_transaction_lines ctl
             INNER JOIN items i ON i.id = ctl.item_id
-            WHERE ctl.transaction_id IN ({string.Join(", ", parameterNames)})
+            WHERE ctl.transaction_id IN (SELECT value FROM json_each($ids))
             ORDER BY ctl.transaction_id, ctl.id;
             """;
 
@@ -224,5 +223,7 @@ internal sealed class SqliteAuditRecordReader
         byte[]? BeforeSnapshot,
         byte[]? AfterSnapshot,
         int Flags,
-        long? SourceJobId);
+        long? SourceJobId,
+        string? OperationId,
+        string? VisitId);
 }

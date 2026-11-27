@@ -9,4 +9,5 @@ public sealed record ContainerRollbackSelectionQuery(
     AuditCause? Cause = null,
     IReadOnlyList<string>? IncludeCodes = null,
     IReadOnlyList<string>? ExcludeCodes = null,
-    int Limit = 5_000);
+    int Limit = 5_000,
+    bool ExcludeJobHistory = true);

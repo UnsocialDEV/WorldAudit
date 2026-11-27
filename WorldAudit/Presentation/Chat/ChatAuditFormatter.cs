@@ -6,6 +6,12 @@ namespace WorldAudit.Presentation.Chat;
 
 public sealed class ChatAuditFormatter : IResultFormatter
 {
+    private readonly Func<BlockPosition, string> _formatPosition;
+
+    public ChatAuditFormatter() : this(static position => $"{position.X}, {position.LocalY}, {position.Z}") { }
+
+    internal ChatAuditFormatter(Func<BlockPosition, string> formatPosition) => _formatPosition = formatPosition;
+
     public IReadOnlyList<string> FormatBlockResults(IReadOnlyList<BlockAuditEvent> events, DateTimeOffset now)
     {
         if (events.Count == 0)
@@ -16,8 +22,14 @@ public sealed class ChatAuditFormatter : IResultFormatter
         var lines = new List<string>(events.Count * 2);
         foreach (var auditEvent in events)
         {
-            lines.Add($"[WA] {FormatRelativeTime(auditEvent.OccurredAt, now)} {auditEvent.Actor.Name} {DescribeAction(auditEvent)} at {auditEvent.Position.X}, {auditEvent.Position.LocalY}, {auditEvent.Position.Z} (dimension {auditEvent.Position.Dimension})");
-            lines.Add($"[WA]      cause: {auditEvent.Cause.ToString().ToLowerInvariant()} | world: {auditEvent.WorldId} | action: {auditEvent.Action.ToString().ToLowerInvariant()}");
+            lines.Add($"""
+
+                [WA] Block at {_formatPosition(auditEvent.Position)} (dimension {auditEvent.Position.Dimension})
+                [WA] Player: {auditEvent.Actor.Name}
+                [WA] Action: {DescribeAction(auditEvent)}
+                [WA] Time: {FormatRelativeTime(auditEvent.OccurredAt, now)}
+                [WA] cause: {auditEvent.Cause.ToString().ToLowerInvariant()} | world: {auditEvent.WorldId} | action: {auditEvent.Action.ToString().ToLowerInvariant()}
+                """);
         }
 
         return lines;
@@ -33,8 +45,14 @@ public sealed class ChatAuditFormatter : IResultFormatter
         var lines = new List<string>(transactions.Count * 2);
         foreach (var transaction in transactions)
         {
-            lines.Add($"[WA] {FormatRelativeTime(transaction.OccurredAt, now)} {transaction.Actor.Name} changed {FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType)} at {transaction.Position.X}, {transaction.Position.LocalY}, {transaction.Position.Z} (dimension {transaction.Position.Dimension})");
-            lines.Add($"[WA]      cause: {transaction.Cause.ToString().ToLowerInvariant()} | inventory: {transaction.InventoryType} | lines: {DescribeContainerLines(transaction.Lines)}");
+            lines.Add($"""
+
+                [WA] {FriendlyName(transaction.ContainerLabel ?? transaction.InventoryType)} at {_formatPosition(transaction.Position)} (dimension {transaction.Position.Dimension})
+                [WA] Player: {transaction.Actor.Name}
+                [WA] Time: {FormatRelativeTime(transaction.OccurredAt, now)}
+                [WA] cause: {transaction.Cause.ToString().ToLowerInvariant()} | inventory: {transaction.InventoryType}
+                [WA] Items: {DescribeContainerLines(transaction.Lines)}
+                """);
         }
 
         return lines;

@@ -49,6 +49,31 @@ public sealed class VintageStoryContainerEventBridgeTests
         Assert.Equal("#unknown", context.ActorName);
         Assert.Null(context.ActorExternalId);
         Assert.Equal(AuditCause.Unknown, context.Cause);
+        Assert.Null(context.VisitId);
+    }
+
+    [Fact]
+    public void ReopeningImmediatelyStartsANewVisitAndClosedEditsHaveNoVisit()
+    {
+        using var fixture = new ContainerTestFixture();
+        var player = ContainerTestFixture.Player("alice", "Alice");
+        fixture.Bridge.TrackInventory(fixture.Inventory);
+        using var actor = fixture.Scopes.BeginAmbientScope(BlockMutationScope.Player("Alice", "alice"));
+        fixture.Inventory.Open(player);
+        fixture.Change(0, fixture.Stack("game:torch", 1));
+        fixture.Change(0, fixture.Stack("game:torch", 2));
+        fixture.Inventory.Close(player);
+        fixture.Change(0, null);
+        fixture.Inventory.Open(player);
+        fixture.Change(0, fixture.Stack("game:torch", 3));
+
+        var ids = fixture.Capture.Contexts.Select(row => row.VisitId).ToArray();
+        Assert.Equal(4, ids.Length);
+        Assert.NotNull(ids[0]);
+        Assert.Equal(ids[0], ids[1]);
+        Assert.Null(ids[2]);
+        Assert.NotNull(ids[3]);
+        Assert.NotEqual(ids[0], ids[3]);
     }
 
     [Fact]
@@ -179,6 +204,60 @@ public sealed class VintageStoryContainerEventBridgeTests
         Assert.Empty(fixture.Bridge.TrackedInventories);
     }
 
+    [Fact]
+    public void ChangingTwoSlotsSerializesOnlyTheirStacksAndPreservesTheSnapshotChain()
+    {
+        using var fixture = new ContainerTestFixture();
+        var serialized = new int[fixture.Inventory.Count];
+        for (var i = 0; i < fixture.Inventory.Count; i++)
+        {
+            var index = i;
+            var stack = fixture.Stack("game:stone", 4);
+            stack.Attributes["probe"] = new SerializationProbe(() => serialized[index]++);
+            fixture.Inventory[i].Itemstack = stack;
+        }
+        fixture.Bridge.TrackInventory(fixture.Inventory);
+        Array.Clear(serialized);
+        using (fixture.Scopes.BeginAmbientScope(BlockMutationScope.Player("Alice", "alice")))
+        {
+            fixture.Inventory[1].Itemstack!.StackSize--;
+            fixture.Inventory[2].Itemstack!.StackSize++;
+            fixture.Inventory.DidModifyItemSlot(fixture.Inventory[1]);
+            fixture.Inventory.DidModifyItemSlot(fixture.Inventory[2]);
+        }
+        Assert.Equal(new[] { 0, 1, 1, 0 }, serialized);
+        var changes = fixture.Capture.Contexts;
+        Assert.Equal(new[] { 1, 2 }, changes.Select(c => Assert.Single(c.Lines).SlotId!.Value));
+        Assert.All(changes, c => Assert.Equal("alice", c.ActorExternalId));
+        Assert.Equal(changes[0].AfterSnapshot, changes[1].BeforeSnapshot);
+    }
+
+    [Fact]
+    public void CaptureReportsTheSlotWhenAnOccupiedStackCannotSerialize()
+    {
+        using var fixture = new ContainerTestFixture();
+        fixture.Bridge.TrackInventory(fixture.Inventory);
+        var stack = fixture.Stack("game:torch", 5);
+        stack.Attributes["broken"] = new SerializationProbe(() => throw new IOException("serialization probe"));
+        fixture.Change(2, stack);
+        var error = Assert.Single(fixture.Errors);
+        Assert.Contains("serialization probe", error);
+        fixture.Errors.Clear();
+        var line = Assert.Single(Assert.Single(fixture.Capture.Contexts).Lines);
+        Assert.Equal(2, line.SlotId);
+        Assert.Equal(5, line.AfterQuantity);
+        Assert.Null(line.StackAfterSnapshot);
+    }
+
+    private sealed class SerializationProbe(Action onWrite) : Vintagestory.API.Datastructures.StringAttribute("probe"), Vintagestory.API.Datastructures.IAttribute
+    {
+        void Vintagestory.API.Datastructures.IAttribute.ToBytes(BinaryWriter stream)
+        {
+            onWrite();
+            base.ToBytes(stream);
+        }
+    }
+
     private static void DidUse(VintageStoryContainerEventBridge bridge, IServerPlayer player, BlockPos position)
         => typeof(VintageStoryContainerEventBridge)
             .GetMethod("OnDidUseBlock", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -190,7 +269,7 @@ internal sealed class ContainerTestFixture : IDisposable
     private readonly Dictionary<string, Block> _blocks = new();
     private readonly Dictionary<int, Item> _items = new();
     private readonly string _containerType;
-    private readonly List<string> _errors = [];
+    internal List<string> Errors { get; } = [];
     internal BlockPos Position { get; } = new(5, 65, 5);
     internal InventoryGeneric Inventory { get; }
     internal TestContainer? Container { get; set; }
@@ -207,7 +286,7 @@ internal sealed class ContainerTestFixture : IDisposable
         _containerType = containerType;
         var logger = ProxyFactory.Create<ILogger>(p => p.SetHandler("Error", args =>
         {
-            _errors.Add(string.Join(" ", args ?? []));
+            Errors.Add(args is [string format, object[] values] ? string.Format(format, values) : string.Join(" ", args ?? []));
             return null;
         }));
         var accessor = ProxyFactory.Create<IBlockAccessor>(p =>
@@ -278,7 +357,7 @@ internal sealed class ContainerTestFixture : IDisposable
     public void Dispose()
     {
         Bridge.Unregister();
-        Assert.Empty(_errors);
+        Assert.Empty(Errors);
     }
 
     internal sealed class CaptureSink : IContainerTransactionCapture

@@ -10,6 +10,8 @@ public sealed class LookupCommandParserTests
     [InlineData("user:Unsocial")]
     [InlineData("-containers")]
     [InlineData("u:")]
+    [InlineData("p:101")]
+    [InlineData("p:2147483647")]
     public void Parse_RejectsInvalidFiltersInsteadOfBroadeningSelection(string token)
     {
         var error = Assert.Throws<FormatException>(() => new LookupCommandParser().Parse([token], DateTimeOffset.UtcNow));

@@ -36,8 +36,8 @@ internal sealed class WorldAuditInspectCommandHandler
                 var blockResults = await _context.Runtime.BlockQueries
                     .GetHistoryAsync(worldId, blockPosition, limit: InspectHistoryLimit)
                     .ConfigureAwait(false);
-                var containerResults = await _context.Runtime.ContainerQueries
-                    .GetHistoryAsync(worldId, blockPosition, limit: InspectHistoryLimit)
+                var containerResults = await _context.Runtime.ContainerInspectHistory
+                    .ReadAsync(worldId, blockPosition, limit: InspectHistoryLimit)
                     .ConfigureAwait(false);
 
                 await EnqueueMainThreadAsync(
@@ -51,7 +51,7 @@ internal sealed class WorldAuditInspectCommandHandler
             message =>
             {
                 return EnqueueMainThreadAsync(
-                    () => player.SendMessage(0, message, EnumChatType.CommandError, null),
+                    () => player.SendAuditLine(_context.AuditGroup(player), message, EnumChatType.CommandError),
                     "worldaudit-inspect-history-error");
             });
     }
@@ -78,7 +78,7 @@ internal sealed class WorldAuditInspectCommandHandler
 
     public TextCommandResult HandleInspect(TextCommandCallingArgs args)
     {
-        return _context.ExecuteSafely("inspect", () =>
+        return _context.ExecuteSafely(args, "inspect", () =>
         {
             if (args.Caller?.Player is not IServerPlayer player)
             {
@@ -109,7 +109,7 @@ internal sealed class WorldAuditInspectCommandHandler
         string worldId,
         BlockPosition position,
         IReadOnlyList<BlockAuditEvent> blockResults,
-        IReadOnlyList<ContainerAuditTransaction> containerResults)
+        IReadOnlyList<ContainerInspectEntry> containerResults)
     {
         var rows = WorldAuditCommandText.BuildInspectRows(blockResults, containerResults);
         var page = _context.InspectorState.AdvancePage(player.PlayerUID, worldId, position, rows.Count, InspectPageSize);
@@ -130,9 +130,12 @@ internal sealed class WorldAuditInspectCommandHandler
             pageRows,
             page.NextPage);
 
+        var group = _context.AuditGroup(player);
+        InspectChatReset.Clear(player, group);
         foreach (var line in lines)
         {
-            player.SendMessage(0, line, EnumChatType.CommandSuccess, null);
+            // Only this internal formatter supplies VTML. It escapes every dynamic field.
+            player.SendMessage(group, line, EnumChatType.CommandSuccess, null);
         }
     }
 

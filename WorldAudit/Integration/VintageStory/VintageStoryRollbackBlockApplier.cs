@@ -39,6 +39,13 @@ public sealed class VintageStoryRollbackBlockApplier : IRollbackBlockApplier
 
         var currentBlock = blockAccessor.GetBlock(pos, entry.Layer);
         var previousBlockCode = currentBlock.Code?.ToString() ?? "game:air";
+        if (entry.Operation == RollbackJobOperation.Rollback)
+        {
+            var effectiveEntry = FireRollbackTransition.Resolve(entry, previousBlockCode);
+            if (effectiveEntry is null)
+                return Task.FromResult(new RollbackBlockApplyResult(RollbackBlockApplyStatus.Applied, false, previousBlockCode));
+            entry = effectiveEntry;
+        }
         byte[]? previousBlockEntitySnapshot;
         try
         {
@@ -51,7 +58,7 @@ public sealed class VintageStoryRollbackBlockApplier : IRollbackBlockApplier
 
         var expectedCode = string.IsNullOrWhiteSpace(entry.ExpectedBlockCode) ? "game:air" : entry.ExpectedBlockCode;
         if (!string.Equals(previousBlockCode, expectedCode, StringComparison.OrdinalIgnoreCase)
-            || !SnapshotsEqual(previousBlockEntitySnapshot, entry.ExpectedBlockEntitySnapshot)
+            || !MatchesExpectedState(pos, previousBlockEntitySnapshot, entry.ExpectedBlockEntitySnapshot, expectedCode)
             || (entry.Layer == 1 && !string.IsNullOrWhiteSpace(currentBlock.EntityClass) && previousBlockEntitySnapshot is null))
         {
             return Task.FromResult(new RollbackBlockApplyResult(RollbackBlockApplyStatus.Conflict, false, previousBlockCode,
@@ -89,7 +96,18 @@ public sealed class VintageStoryRollbackBlockApplier : IRollbackBlockApplier
                 $"Block '{targetCode}' does not expose a block entity for snapshot restore."));
         }
 
-        var applySucceeded = TryApplyTargetState(pos, entry.Layer, targetBlock, targetCode, previousBlockCode, entry.TargetBlockEntitySnapshot, out var applyStatus, out var applyError, out var mutationAttempted);
+        byte[]? targetSnapshot;
+        try
+        {
+            var entityType = entry.TargetBlockEntitySnapshot is null ? null : _api.ClassRegistry?.GetBlockEntity(targetBlock.EntityClass);
+            targetSnapshot = RebuildSnapshot.Prepare(entityType, entry.TargetBlockEntitySnapshot);
+        }
+        catch (Exception exception)
+        {
+            return Task.FromResult(new RollbackBlockApplyResult(RollbackBlockApplyStatus.Conflict, false, previousBlockCode,
+                $"Cannot read the target block entity: {exception.Message}"));
+        }
+        var applySucceeded = TryApplyTargetState(pos, entry.Layer, targetBlock, targetCode, previousBlockCode, targetSnapshot, out var applyStatus, out var applyError, out var mutationAttempted);
         if (applySucceeded)
         {
             try
@@ -144,6 +162,19 @@ public sealed class VintageStoryRollbackBlockApplier : IRollbackBlockApplier
         }
 
         return Task.FromResult(new RollbackBlockApplyResult(applyStatus, false, previousBlockCode, applyError));
+    }
+
+    private bool MatchesExpectedState(BlockPos pos, byte[]? current, byte[]? expected, string expectedCode)
+    {
+        if (_snapshotCodec.AreEquivalent(current, expected, expectedCode)) return true;
+        if (current is null || expected is null) return false;
+        // Compare the live bytes untouched. Only the recorded side may represent an earlier inert rebuild.
+        try
+        {
+            var inert = RebuildSnapshot.Prepare(_api.World.BlockAccessor.GetBlockEntity(pos)?.GetType(), expected);
+            return !ReferenceEquals(inert, expected) && _snapshotCodec.AreEquivalent(current, inert);
+        }
+        catch { return false; }
     }
 
     private bool TryApplyTargetState(

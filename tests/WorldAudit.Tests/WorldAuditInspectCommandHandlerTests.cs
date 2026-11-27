@@ -104,9 +104,9 @@ public sealed class WorldAuditInspectCommandHandlerTests : IAsyncLifetime
             new InspectorStateService(),
             () => new ChatAuditFormatter(),
             () => "main",
-            () => (true, string.Empty));
+            () => (true, string.Empty), _ => 23);
         var handler = new WorldAuditInspectCommandHandler(context);
-        var player = CreateServerPlayer("player-1", "Dayton", sentMessages);
+        var player = CreateServerPlayer("player-1", "Dayton", sentMessages.Add);
         var started = Stopwatch.StartNew();
 
         await handler.SendInspectHistoryAsync(player, position).WaitAsync(TimeSpan.FromSeconds(5));
@@ -115,8 +115,41 @@ public sealed class WorldAuditInspectCommandHandlerTests : IAsyncLifetime
         Assert.Contains(mainThreadCodes, code => code == "worldaudit-inspect-history");
         Assert.Contains(inspectIndicatorMessages, message => message == "[WorldAudit] Inspection mode enabled");
         Assert.Contains(sentMessages, message => message.Contains("Dayton", StringComparison.Ordinal));
-        Assert.Contains(sentMessages, message => message.Contains("Crate changed", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(sentMessages, message => message.Contains("Added 1 Gear Rusty", StringComparison.OrdinalIgnoreCase));
         Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Equal(30, sentMessages.TakeWhile(string.IsNullOrEmpty).Count());
+        sentMessages.Clear();
+        await handler.SendInspectHistoryAsync(player, new BlockPos(11, 65, 10)).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(30, sentMessages.TakeWhile(string.IsNullOrEmpty).Count());
+        Assert.Contains("Inspect: 11, 65, 10", sentMessages[30]);
+        Assert.DoesNotContain(sentMessages.Skip(30), line => line.Contains("Dayton"));
+    }
+
+    [Fact]
+    public async Task RollbackHandler_ReportsDelayedWriterTimeoutAndRetryIncludesThePendingEdit()
+    {
+        var api = CreateServerApi([], []);
+        var context = new WorldAuditCommandContext(api, () => _runtime, () => new WorldAuditModConfig(),
+            new LookupCommandParser(), new PurgeCommandParser(), new InspectorStateService(), () => new ChatAuditFormatter(),
+            () => "main", () => (true, ""), _ => 23);
+        var handler = new WorldAuditRollbackCommandHandler(context);
+        var reply = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var player = CreateServerPlayer("uid", "Player", message => reply.TrySetResult(message));
+        var args = new TextCommandCallingArgs { Caller = new Caller { Player = player } };
+        await using var connection = await new WorldAudit.Infrastructure.Persistence.SqliteConnectionFactory(_runtime.Options).OpenConnectionAsync();
+        await using (var held = connection.BeginTransaction())
+        {
+            await _runtime.BlockCapture.CaptureAsync(BlockChangeCaptureContext.PlayerBroke("main", new(0, 0, 0),
+                DateTimeOffset.UtcNow, "Player", "uid", "game:stone"));
+            Assert.Equal(EnumCommandStatus.Deferred, handler.HandleRollback(args).Status);
+            Assert.Contains("retry the preview", await reply.Task.WaitAsync(TimeSpan.FromSeconds(18)));
+            await held.RollbackAsync();
+        }
+        Assert.Empty(await _runtime.Repository.GetRollbackJobsAsync());
+        reply = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.Equal(EnumCommandStatus.Deferred, handler.HandleRollback(args).Status);
+        Assert.Contains("ready", await reply.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, Assert.Single(await _runtime.Repository.GetRollbackJobsAsync()).PlannedBlockCount);
     }
 
     private static ICoreServerAPI CreateServerApi(List<string> mainThreadCodes, List<string> inspectIndicatorMessages)
@@ -149,7 +182,7 @@ public sealed class WorldAuditInspectCommandHandlerTests : IAsyncLifetime
         });
     }
 
-    private static IServerPlayer CreateServerPlayer(string playerUid, string playerName, List<string> sentMessages)
+    private static IServerPlayer CreateServerPlayer(string playerUid, string playerName, Action<string> receive)
     {
         return ProxyFactory.Create<IServerPlayer>(proxy =>
         {
@@ -157,7 +190,8 @@ public sealed class WorldAuditInspectCommandHandlerTests : IAsyncLifetime
             proxy.SetValue(nameof(IServerPlayer.PlayerName), playerName);
             proxy.SetHandler("SendMessage", args =>
             {
-                sentMessages.Add((string)args![1]!);
+                Assert.Equal(23, args![0]);
+                receive(ChatText.Read((string)args[1]!));
                 return null;
             });
         });

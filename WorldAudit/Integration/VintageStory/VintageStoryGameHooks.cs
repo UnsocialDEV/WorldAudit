@@ -10,7 +10,8 @@ using WorldAudit.Domain;
 
 namespace WorldAudit.Integration.VintageStory;
 
-internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMutationMonitor monitor) : IDisposable
+internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMutationMonitor monitor,
+    System.Func<string, bool>? isInspectEnabled = null) : IDisposable
 {
     private readonly ICoreServerAPI _api = api;
     private readonly VintageStoryMutationMonitor _monitor = monitor;
@@ -18,6 +19,7 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
     private readonly Harmony _harmony = new(PatchId);
     private static VintageStoryGameHooks? _current;
     private readonly ConditionalWeakTable<IBulkBlockAccessor, Dictionary<(BlockPos Position, int Layer), BlockMutationScope>> _queuedActors = new();
+    internal static string? ContainerOperationId => _current?._monitor.ContainerOperationId;
     internal static bool Active => _current is not null;
     private static readonly BindingFlags DeclaredMethods = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
 
@@ -69,6 +71,11 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
                     }
                 }
             }
+            // Both ServerEventAPI and IWorldAccessor forward one-shot callbacks to ServerMain.
+            var serverMain = AccessTools.TypeByName("Vintagestory.Server.ServerMain");
+            foreach (var method in serverMain.GetMethods(DeclaredMethods).Where(m =>
+                m.Name is "RegisterCallback" or "RegisterCallbackUnique" or "EnqueueMainThreadTask"))
+                _harmony.Patch(method, prefix: new HarmonyMethod(typeof(VintageStoryGameHooks), nameof(CaptureDelayedActor)));
             _current = this;
         }
         catch
@@ -154,6 +161,9 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
                 scope = string.IsNullOrEmpty(uid) ? BlockMutationScope.Synthetic(explicitCause)
                     : new BlockMutationScope(current._api.World.PlayerByUid(uid)?.PlayerName ?? uid, uid, explicitCause);
             __state = current._monitor.Begin(scope);
+            // Keep actor scope for actual writes, but a read-only inspect packet needs no eager snapshot.
+            if (player is not null && current.IsInspectPacket(player.PlayerUID, __originalMethod))
+                return;
             if (__instance is IBulkBlockAccessor bulk && __originalMethod.Name is "Commit" or "FastCommit") CaptureStaged(bulk);
             var positions = __args.OfType<BlockPos>().Concat(__args.OfType<BlockSelection>().Select(s => s.Position)).ToList();
             if (__instance is BlockEntity blockEntity) positions.Add(blockEntity.Pos);
@@ -185,6 +195,28 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
         {
             current._api.Logger.Error("[WorldAudit] Game operation capture failed: {0}", exception);
         }
+    }
+
+    private bool IsInspectPacket(string playerUid, MethodBase method) =>
+        isInspectEnabled?.Invoke(playerUid) == true &&
+        (method.DeclaringType?.Name == "ServerSystemBlockSimulation" &&
+            method.Name is "HandleBlockPlaceOrBreak" or "HandleBlockInteract"
+         || method.DeclaringType?.Name == "ServerSystemInventory" &&
+            method.Name is "HandleHandInteraction" or "callOnUsing");
+
+    private static void CaptureDelayedActor(object __instance, object[] __args)
+    {
+        var hooks = _current;
+        if (hooks is null || !ReferenceEquals(hooks._api.World, __instance) ||
+            hooks._monitor.CurrentScope is not { IsTrusted: true, Cause: AuditCause.Player, ActorExternalId: { Length: > 0 } } scope ||
+            __args[0] is not Delegate callback) return;
+        var actor = BlockMutationScope.Player(scope.ActorName, scope.ActorExternalId);
+        __args[0] = VintageStoryDeferredActor.Bind(callback, () =>
+        {
+            // A reload replaces the monitor. Keep the initiating identity with the original world.
+            var active = _current;
+            return active is not null && ReferenceEquals(active._api.World, __instance) ? active._monitor.Begin(actor) : null;
+        });
     }
 
     private static object? Member(object value, string name)
@@ -250,9 +282,13 @@ internal sealed class VintageStoryGameHooks(ICoreServerAPI api, VintageStoryMuta
             foreach (var key in actors.Keys.Where(p => !bulk.StagedBlocks.ContainsKey(p.Position)).ToArray()) actors.Remove(key);
     }
 
-    private static void ContainerAvailable(BlockEntity __instance)
+    private static void ContainerAvailable(BlockEntity __instance, MethodBase __originalMethod)
     {
-        if (__instance.Api?.Side == EnumAppSide.Server && __instance is IBlockEntityContainer container && container.Inventory is InventoryBase inventory)
+        if (__instance.Api?.Side != EnumAppSide.Server || __instance is not IBlockEntityContainer container ||
+            container.Inventory is not InventoryBase inventory) return;
+        if (__originalMethod.Name == "FromTreeAttributes")
+            VintageStoryContainerEventBridge.Current?.InventoryDeserialized(inventory);
+        else
             VintageStoryContainerEventBridge.Current?.TrackInventory(inventory);
     }
 

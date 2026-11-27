@@ -14,9 +14,14 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
     private readonly IAuditRepository _repository;
     private readonly WorldAuditOptions _options;
     private readonly AuditPerformanceDiagnostics? _diagnostics;
-    private readonly CancellationTokenSource _shutdownTokenSource = new();
     private readonly Task _consumerTask;
     private readonly ConcurrentDictionary<long, TaskCompletionSource<bool>> _flushWaiters = [];
+    private const int MaxPendingEvents = 8192;
+    private const long MaxPendingPayloadBytes = 64L * 1024 * 1024;
+    private readonly object _admission = new();
+    private long _pendingBytes;
+    private long _rejectedEvents;
+    private Task? _currentFlush;
     private long _pendingEvents;
     private long _persistedEvents;
     private long _nextFlushId;
@@ -28,6 +33,7 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
     private long _slowestFlushDurationTicks;
     private Exception? _consumerException;
     private int _isPaused;
+    private int _resumeSignalQueued;
 
     public ChannelAuditWriter(IAuditRepository repository, WorldAuditOptions options, AuditPerformanceDiagnostics? diagnostics = null)
     {
@@ -45,8 +51,8 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
     public void QueueBlockEvent(BlockAuditEvent auditEvent)
     {
         ArgumentNullException.ThrowIfNull(auditEvent);
-        ThrowIfFaulted();
-        EnqueueCore(new EventItem(auditEvent), countsAsPendingEvent: true);
+        if (FireBlock.Matches(auditEvent.OldBlockCode) && FireBlock.Matches(auditEvent.NewBlockCode)) return;
+        EnqueueEvent(new EventItem(auditEvent), BlockPayloadSize.Estimate(auditEvent));
     }
 
     public ValueTask QueueBlockEventAsync(BlockAuditEvent auditEvent, CancellationToken cancellationToken = default)
@@ -59,8 +65,7 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
     public void QueueContainerTransaction(ContainerAuditTransaction transaction)
     {
         ArgumentNullException.ThrowIfNull(transaction);
-        ThrowIfFaulted();
-        EnqueueCore(new ContainerTransactionItem(transaction), countsAsPendingEvent: true);
+        EnqueueEvent(new ContainerTransactionItem(transaction), ContainerPayloadSize.Estimate(transaction));
     }
 
     public ValueTask QueueContainerTransactionAsync(ContainerAuditTransaction transaction, CancellationToken cancellationToken = default)
@@ -70,33 +75,27 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    public Task FlushAsync(CancellationToken cancellationToken = default)
     {
-        ThrowIfFaulted();
-
-        if (Volatile.Read(ref _pendingEvents) == 0)
+        lock (_admission)
         {
-            return;
+            ThrowIfFaulted();
+            if (_pendingEvents == 0) return Task.CompletedTask;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_currentFlush is null)
+            {
+                var id = ++_nextFlushId;
+                var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _flushWaiters[id] = completion;
+                if (!_channel.Writer.TryWrite(new FlushItem(id)))
+                {
+                    _flushWaiters.TryRemove(id, out _);
+                    throw new InvalidOperationException("The audit writer is closed.");
+                }
+                _currentFlush = completion.Task;
+            }
+            return _currentFlush.WaitAsync(cancellationToken);
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var flushId = Interlocked.Increment(ref _nextFlushId);
-        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _flushWaiters[flushId] = completion;
-
-        try
-        {
-            EnqueueCore(new FlushItem(flushId), countsAsPendingEvent: false);
-            await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            _flushWaiters.TryRemove(flushId, out _);
-            throw;
-        }
-
-        ThrowIfFaulted();
     }
 
     public void Pause()
@@ -108,7 +107,7 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
     public void Resume()
     {
         ThrowIfFaulted();
-        if (Interlocked.Exchange(ref _isPaused, 0) == 1)
+        if (Interlocked.Exchange(ref _isPaused, 0) == 1 && Interlocked.Exchange(ref _resumeSignalQueued, 1) == 0)
         {
             _channel.Writer.TryWrite(ResumeSignalItem.Instance);
         }
@@ -128,42 +127,21 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
             LastFlushBatchSize: Volatile.Read(ref _lastFlushBatchSize),
             LargestFlushBatchSize: Volatile.Read(ref _largestFlushBatchSize),
             SlowFlushCount: Volatile.Read(ref _slowFlushCount),
-            SlowestFlushDuration: TimeSpan.FromTicks(Volatile.Read(ref _slowestFlushDurationTicks)));
+            SlowestFlushDuration: TimeSpan.FromTicks(Volatile.Read(ref _slowestFlushDurationTicks)),
+            RejectedEvents: Volatile.Read(ref _rejectedEvents));
     }
 
     public async ValueTask DisposeAsync()
     {
-        try
-        {
-            await FlushAsync().ConfigureAwait(false);
-        }
-        catch (InvalidOperationException)
-        {
-        }
-
         _channel.Writer.TryComplete();
-        _shutdownTokenSource.Cancel();
-
-        try
-        {
-            var completedTask = await Task.WhenAny(_consumerTask, Task.Delay(500)).ConfigureAwait(false);
-            if (completedTask == _consumerTask)
-            {
-                await _consumerTask.ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-
+        await _consumerTask.ConfigureAwait(false);
         ThrowIfFaulted();
-        _shutdownTokenSource.Dispose();
     }
 
     private async Task ProcessQueueAsync()
     {
-        var blockBatch = new List<BlockAuditEvent>(_options.WriterBatchSize);
-        var containerBatch = new List<ContainerAuditTransaction>(_options.WriterBatchSize);
+        var blockBatch = new List<BlockAuditEvent>(Math.Min(MaxPendingEvents, _options.WriterBatchSize));
+        var containerBatch = new List<ContainerAuditTransaction>(Math.Min(MaxPendingEvents, _options.WriterBatchSize));
         Exception? consumerException = null;
 
         try
@@ -173,14 +151,14 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
                 QueueItem item;
                 try
                 {
-                    item = await _channel.Reader.ReadAsync(_shutdownTokenSource.Token).ConfigureAwait(false);
+                    item = await _channel.Reader.ReadAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (ChannelClosedException)
                 {
                     break;
                 }
 
-                if (!await HandleItemAsync(item, blockBatch, containerBatch, _shutdownTokenSource.Token).ConfigureAwait(false))
+                if (!await HandleItemAsync(item, blockBatch, containerBatch, CancellationToken.None).ConfigureAwait(false))
                 {
                     continue;
                 }
@@ -191,14 +169,14 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
                 }
 
                 using var batchWindow = new CancellationTokenSource(_options.WriterMaxFlushDelay);
-                using var linkedTokenSource = CancellationTokenSource.CreateLinkedTokenSource(_shutdownTokenSource.Token, batchWindow.Token);
+
 
                 while (blockBatch.Count + containerBatch.Count < _options.WriterBatchSize)
                 {
                     if (_channel.Reader.TryRead(out var bufferedItem))
                     {
                         item = bufferedItem;
-                        if (!await HandleItemAsync(item, blockBatch, containerBatch, _shutdownTokenSource.Token).ConfigureAwait(false))
+                        if (!await HandleItemAsync(item, blockBatch, containerBatch, CancellationToken.None).ConfigureAwait(false))
                         {
                             continue;
                         }
@@ -218,18 +196,18 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
 
                     try
                     {
-                        item = await _channel.Reader.ReadAsync(linkedTokenSource.Token).ConfigureAwait(false);
+                        item = await _channel.Reader.ReadAsync(batchWindow.Token).ConfigureAwait(false);
                     }
                     catch (ChannelClosedException)
                     {
                         break;
                     }
-                    catch (OperationCanceledException) when (batchWindow.IsCancellationRequested && !_shutdownTokenSource.IsCancellationRequested)
+                    catch (OperationCanceledException) when (batchWindow.IsCancellationRequested)
                     {
                         break;
                     }
 
-                    if (!await HandleItemAsync(item, blockBatch, containerBatch, _shutdownTokenSource.Token).ConfigureAwait(false))
+                    if (!await HandleItemAsync(item, blockBatch, containerBatch, CancellationToken.None).ConfigureAwait(false))
                     {
                         continue;
                     }
@@ -242,7 +220,7 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
 
                 if (!IsPaused && (blockBatch.Count > 0 || containerBatch.Count > 0))
                 {
-                    await PersistBatchAsync(blockBatch, containerBatch, _shutdownTokenSource.Token).ConfigureAwait(false);
+                    await PersistBatchAsync(blockBatch, containerBatch, CancellationToken.None).ConfigureAwait(false);
                 }
             }
 
@@ -251,13 +229,18 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
                 await PersistBatchAsync(blockBatch, containerBatch, CancellationToken.None).ConfigureAwait(false);
             }
         }
-        catch (OperationCanceledException)
-        {
-        }
         catch (Exception exception)
         {
             consumerException = exception;
-            RecordConsumerFault(exception);
+            lock (_admission)
+            {
+                Interlocked.CompareExchange(ref _consumerException, exception, null);
+                _channel.Writer.TryComplete(exception);
+                Interlocked.Add(ref _rejectedEvents, _pendingEvents);
+                _pendingEvents = 0;
+                _pendingBytes = 0;
+            }
+            while (_channel.Reader.TryRead(out _)) { }
         }
         finally
         {
@@ -291,6 +274,7 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
                 return false;
 
             case ResumeSignalItem:
+                Volatile.Write(ref _resumeSignalQueued, 0);
                 if (!IsPaused && (blockBatch.Count > 0 || containerBatch.Count > 0))
                 {
                     await PersistBatchAsync(blockBatch, containerBatch, cancellationToken).ConfigureAwait(false);
@@ -309,20 +293,20 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var started = DateTime.UtcNow;
+        var persistedCount = blockBatch.Count + containerBatch.Count;
         if (blockBatch.Count > 0)
         {
             await _repository.WriteBlockEventsAsync(blockBatch, cancellationToken).ConfigureAwait(false);
+            ReleasePersisted(blockBatch.Count, blockBatch.Sum(BlockPayloadSize.Estimate));
         }
 
         if (containerBatch.Count > 0)
         {
             await _repository.WriteContainerTransactionsAsync(containerBatch, cancellationToken).ConfigureAwait(false);
+            ReleasePersisted(containerBatch.Count, containerBatch.Sum(ContainerPayloadSize.Estimate));
         }
 
-        var persistedCount = blockBatch.Count + containerBatch.Count;
         var duration = DateTime.UtcNow - started;
-        Interlocked.Add(ref _persistedEvents, persistedCount);
-        Interlocked.Add(ref _pendingEvents, -persistedCount);
         Interlocked.Increment(ref _flushCount);
         Interlocked.Exchange(ref _lastFlushDurationTicks, duration.Ticks);
         Interlocked.Exchange(ref _lastFlushBatchSize, persistedCount);
@@ -380,30 +364,32 @@ public sealed class ChannelAuditWriter : IAuditWriter, IAsyncDisposable
         }
     }
 
-    private void EnqueueCore(QueueItem item, bool countsAsPendingEvent)
+    private void EnqueueEvent(QueueItem item, long payloadBytes)
     {
-        if (countsAsPendingEvent)
+        lock (_admission)
         {
-            Interlocked.Increment(ref _pendingEvents);
-        }
+            if (_consumerException is not null || _pendingEvents >= MaxPendingEvents ||
+                payloadBytes > MaxPendingPayloadBytes - _pendingBytes || !_channel.Writer.TryWrite(item))
+            {
+                Interlocked.Increment(ref _rejectedEvents);
+                ThrowIfFaulted();
+                throw new InvalidOperationException("Audit record rejected because the writer is full or closed. See /wa status.");
+            }
 
-        if (_channel.Writer.TryWrite(item))
-        {
-            return;
+            _pendingEvents++;
+            _pendingBytes += payloadBytes;
+            _currentFlush = null;
         }
-
-        if (countsAsPendingEvent)
-        {
-            Interlocked.Decrement(ref _pendingEvents);
-        }
-
-        ThrowIfFaulted();
-        throw new InvalidOperationException("The audit writer is no longer accepting events.");
     }
 
-    private void RecordConsumerFault(Exception exception)
+    private void ReleasePersisted(int count, long bytes)
     {
-        Interlocked.CompareExchange(ref _consumerException, exception, null);
+        lock (_admission)
+        {
+            _pendingEvents -= count;
+            _pendingBytes -= bytes;
+            Interlocked.Add(ref _persistedEvents, count);
+        }
     }
 
     private void CompleteFlushWaiter(long flushId)

@@ -282,10 +282,12 @@ public sealed class VintageStoryRollbackContainerApplier : IRollbackContainerApp
         for (var index = 0; index < count; index++)
         {
             var slotId = reader.ReadInt32();
-            _ = reader.ReadString();
-            _ = reader.ReadInt32();
+            var itemCode = reader.ReadString();
+            var quantity = reader.ReadInt32();
             var stackLength = reader.ReadInt32();
             if (stackLength < 0 || stackLength > stream.Length - stream.Position) throw new InvalidDataException("Invalid stack length.");
+            if (stackLength == 0 && (itemCode.Length > 0 || quantity != 0))
+                throw new InvalidDataException($"Container slot {slotId} records {quantity} {itemCode} but its item stack data is missing.");
             var stackBytes = stackLength > 0 ? reader.ReadBytes(stackLength) : null;
             result.Add(new SnapshotSlot(slotId, stackBytes));
         }

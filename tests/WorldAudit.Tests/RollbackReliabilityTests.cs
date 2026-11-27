@@ -57,7 +57,7 @@ public sealed class RollbackReliabilityTests
         var repository = ProxyFactory.Create<IAuditRepository>(p =>
         {
             p.SetHandler(nameof(IAuditRepository.GetRollbackJobAsync), _ => Task.FromResult<RollbackJob?>(job));
-            p.SetHandler(nameof(IAuditRepository.GetRollbackPlanEntriesAsync), _ => Task.FromResult<IReadOnlyList<RollbackPlanEntry>>([entry]));
+            p.SetHandler(nameof(IAuditRepository.GetRollbackPlanBatchAsync), _ => Task.FromResult<IReadOnlyList<RollbackPlanEntry>>([entry]));
             p.SetHandler(nameof(IAuditRepository.UpdateRollbackJobStateAsync), args => { job = job with { State = (RollbackJobState)args![1]! }; return Task.CompletedTask; });
             p.SetHandler(nameof(IAuditRepository.RecordRollbackBatchAsync), args =>
             {

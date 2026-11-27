@@ -13,4 +13,6 @@ public sealed record ContainerAuditTransaction(
     byte[]? AfterSnapshot,
     IReadOnlyList<ContainerAuditLine> Lines,
     int Flags = 0,
-    long? SourceJobId = null);
+    long? SourceJobId = null,
+    string? OperationId = null,
+    string? VisitId = null);

@@ -13,8 +13,10 @@ namespace WorldAudit.Tests;
 
 public sealed class WorldAuditAdminCommandHandlerTests
 {
-    [Fact]
-    public async Task PurgePreview_ReturnsWhileDatabaseIsLocked_AndRepliesOnMainThread()
+    [Theory]
+    [InlineData("t:1s", "Total candidates: 0")]
+    [InlineData("confirm t:1s", "Purged 0 record(s)")]
+    public async Task Purge_ReturnsWhileDatabaseIsLocked_AndRepliesOnMainThread(string query, string expected)
     {
         var options = new WorldAuditOptions { DatabasePath = Path.Combine(Path.GetTempPath(), $"wa-admin-{Guid.NewGuid():N}.db") };
         await using var runtime = await WorldAuditRuntime.CreateAsync(options);
@@ -33,17 +35,18 @@ public sealed class WorldAuditAdminCommandHandlerTests
         });
         var player = ProxyFactory.Create<IServerPlayer>(proxy => proxy.SetHandler("SendMessage", args =>
         {
-            messages.Add((string)args![1]!);
+            Assert.Equal(23, args![0]);
+            messages.Add(ChatText.Read((string)args[1]!));
             return null;
         }));
         var context = new WorldAuditCommandContext(api, () => runtime, () => new WorldAuditModConfig(),
             new LookupCommandParser(), new PurgeCommandParser(), new InspectorStateService(),
-            () => new ChatAuditFormatter(), () => "main", () => (true, ""));
+            () => new ChatAuditFormatter(), () => "main", () => (true, ""), _ => 23);
         var handler = new WorldAuditAdminCommandHandler(context);
         var parser = ProxyFactory.Create<ICommandArgumentParser>(proxy =>
         {
             proxy.SetValue(nameof(ICommandArgumentParser.ArgCount), 1);
-            proxy.SetHandler("GetValue", _ => "t:1s");
+            proxy.SetHandler("GetValue", _ => query);
         });
         var args = new TextCommandCallingArgs { Caller = new Caller { Player = player }, Parsers = [parser] };
         await using var connection = await new SqliteConnectionFactory(options).OpenConnectionAsync();
@@ -68,8 +71,39 @@ public sealed class WorldAuditAdminCommandHandlerTests
         var sendReply = await reply.Task.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Empty(messages);
         sendReply();
-        Assert.Contains(messages, line => line.Contains("Total candidates: 0"));
+        Assert.Contains(messages, line => line.Contains(expected));
         Assert.DoesNotContain(messages, line => line.Contains("failed:"));
+    }
+
+    [Fact]
+    public async Task UnreadableDatabase_StillReportsLostEventsAndFinishesFlushAndShutdown()
+    {
+        var options = new WorldAuditOptions { DatabasePath = Path.Combine(Path.GetTempPath(), $"wa-offline-{Guid.NewGuid():N}.db") };
+        var runtime = await WorldAuditRuntime.CreateAsync(options);
+        await using (var connection = await new SqliteConnectionFactory(options).OpenConnectionAsync())
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearPool(connection);
+        }
+        // The disposable file is no longer a readable SQLite database.
+        await File.WriteAllTextAsync(options.DatabasePath, new string('x', 4096));
+        var change = WorldAudit.Integration.BlockChangeCaptureContext.PlayerBroke("main", new(1, 64, 1),
+            DateTimeOffset.UtcNow, "Player", "uid", "game:stone");
+        await runtime.BlockCapture.CaptureAsync(change);
+        var flushFailure = await Record.ExceptionAsync(() => runtime.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.NotNull(flushFailure);
+        Assert.IsNotType<TimeoutException>(flushFailure);
+        var status = await runtime.GetStatusAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var lines = WorldAuditCommandText.FormatStatus(status).ToArray();
+        Assert.Contains(lines, line => line.Contains("Storage unavailable"));
+        Assert.Contains(lines, line => line.Contains("Consumer: faulted"));
+        Assert.Contains(lines, line => line.Contains("1 record(s) lost"));
+        Assert.Contains(lines, line => line.Contains("WAL threshold unavailable"));
+        var mod = new WorldAuditModSystem();
+        const System.Reflection.BindingFlags lifecycle = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        typeof(WorldAuditModSystem).GetField("_runtime", lifecycle)!.SetValue(mod, runtime);
+        await Task.Run(() => typeof(WorldAuditModSystem).GetMethod("OnGameWorldSave", lifecycle)!.Invoke(mod, null))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Run(mod.Dispose).WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]

@@ -22,6 +22,8 @@ internal sealed class VintageStoryMutationMonitor(
         return new Lease(this, operation, lease);
     }
 
+    internal string? ContainerOperationId => _operation.Value is { Depth: > 0 } op ? op.ContainerId ??= Guid.NewGuid().ToString("N") : null;
+
     internal BlockMutationScope? CurrentScope => scopes.GetAmbientScope();
 
     internal void Touch(BlockPos pos, BlockMutationScope? scope = null, IBlockAccessor? accessor = null, int? onlyLayer = null)
@@ -32,14 +34,27 @@ internal sealed class VintageStoryMutationMonitor(
         {
             if (onlyLayer is not null && onlyLayer != layer) continue;
             var key = (new BlockPosition(pos.X, pos.InternalY, pos.Z), layer);
-            if (operation.Before.ContainsKey(key)) continue;
+            var actor = scope ?? scopes.GetAmbientScope();
             try
             {
+                if (operation.Before.TryGetValue(key, out var prior))
+                {
+                    if ((prior.Scope is null || !prior.Scope.IsTrusted || prior.Scope.Cause == AuditCause.Unknown)
+                        && actor is { IsTrusted: true } && actor.Cause != AuditCause.Unknown)
+                    {
+                        // A later player may resolve an earlier read, but not claim an earlier write.
+                        var current = (prior.Accessor ?? world.BlockAccessor).GetBlock(pos, layer);
+                        if (current?.Code?.ToString() == prior.Code &&
+                            (layer != BlockLayersAccess.Solid || prior.Accessor is not null || SameBytes(_codec.Capture(pos), prior.Snapshot)))
+                            operation.Before[key] = prior with { Scope = actor };
+                    }
+                    continue;
+                }
                 var block = (accessor ?? world.BlockAccessor).GetBlock(pos, layer);
                 if (block is null) continue;
                 operation.Before.Add(key, new Before(block.Code?.ToString() ?? "game:air",
                     layer == BlockLayersAccess.Solid && accessor is null ? _codec.Capture(pos) : null,
-                    scope ?? scopes.GetAmbientScope(), accessor));
+                    actor, accessor));
             }
             catch (Exception exception) { reportFailure(exception); }
         }
@@ -63,7 +78,7 @@ internal sealed class VintageStoryMutationMonitor(
                 if (code == before.Code && SameBytes(snapshot, before.Snapshot)) continue;
                 capture.Observe(new BlockMutationObservation(worldId(), position, DateTimeOffset.UtcNow,
                     code == "game:air" ? BlockAuditAction.Break : before.Code == "game:air" ? BlockAuditAction.Place : BlockAuditAction.Replace,
-                    before.Code, code, before.Snapshot, snapshot, AmbientScope: before.Scope, Layer: layer));
+                    before.Code, code, before.Snapshot, snapshot, AmbientScope: before.Scope, Layer: layer, OperationId: operation.ContainerId));
             }
             catch (Exception exception) { reportFailure(exception); }
         }
@@ -75,6 +90,7 @@ internal sealed class VintageStoryMutationMonitor(
     private sealed class Operation
     {
         internal int Depth;
+        internal string? ContainerId;
         internal Dictionary<(BlockPosition, int), Before> Before { get; } = new();
     }
     private sealed class Lease(VintageStoryMutationMonitor owner, Operation operation, IDisposable? scope) : IDisposable

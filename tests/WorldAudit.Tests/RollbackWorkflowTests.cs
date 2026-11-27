@@ -531,6 +531,15 @@ public sealed class RollbackWorkflowTests : IAsyncLifetime
         Assert.Equal(2, entries.Count);
         Assert.Equal(0, entries[0].ExecutionOrder);
         Assert.Equal(1, entries[1].ExecutionOrder);
+
+        var capped = new RollbackPlanner(_runtime.Repository, new WorldAuditOptions { RollbackPreviewLimit = 1 });
+        var filters = new LookupFilters(null, 8, "Dayton", null, null, null);
+        var admin = new AuditActor("Admin", "admin-1");
+        var rollback = await capped.PreviewRollbackAsync("main", blockPosition, filters, admin, "mixed");
+        var restore = await capped.PreviewRestoreAsync("main", blockPosition, filters, admin, "mixed");
+        Assert.Equal(2, rollback.PlannedBlockCount + rollback.PlannedContainerCount);
+        Assert.Equal(rollback.PlannedBlockCount, restore.PlannedBlockCount);
+        Assert.Equal(rollback.PlannedContainerCount, restore.PlannedContainerCount);
     }
 
     [Fact]
